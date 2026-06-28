@@ -1,5 +1,5 @@
 {
-  "name": "mcp-thorns",
+  "name": "thorns",
   "version": "5.1.8",
   "description": "Perfect one-shot codebase overview: project context, architecture flow, async/error patterns, dead code, internal call graph",
   "type": "module",
