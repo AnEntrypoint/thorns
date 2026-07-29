@@ -3,11 +3,10 @@ node_modules/
 .DS_Store
 dist/
 coverage/
-.env
-.env.local
 *.tgz
 .vexify.db
 .glootie-stop-verified
 .gm-stop-verified
 
 .code-search/
+config.bat
