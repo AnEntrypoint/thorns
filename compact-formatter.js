@@ -1,960 +1,246 @@
-export function formatUltraCompact(aggregated) {
-  const { stats, entities, metrics, depGraph, duplicates, circular, fileSizes, identifiers, funcLengths, funcParams, fileMetrics, projectContext, deadCode } = aggregated;
-
-  const totalFn = Object.values(stats.byLanguage).reduce((s, l) => s + l.functions, 0);
-  const totalCls = Object.values(stats.byLanguage).reduce((s, l) => s + l.classes, 0);
-  const avgCx = totalFn > 0 ? (Object.values(stats.byLanguage).reduce((s, l) => s + l.complexity, 0) / totalFn).toFixed(1) : 0;
-
-  let output = '';
-
-  const projectInfo = getProjectInfo(projectContext);
-  if (projectInfo) {
-    output += `## 🎯 ${projectInfo}\n\n`;
-  }
-
-  const quickStart = getQuickStart(projectContext);
-  if (quickStart) {
-    output += `## 🚀 Quick Start\n\n${quickStart}\n`;
-  }
-
-  output += `# ${stats.files}f ${k(stats.totalLines)}L ${totalFn}fn ${totalCls}cls cx${avgCx}\n`;
-  output += `*Legend: f=files L=lines fn=functions cls=classes cx=avg-complexity | file:line:name(NL)=location Np=params | ↑N=imports-from ↓N=imported-by (N)=occurrences (+N)=more | 🔄circular 🏝️isolated 🔥complex 📋duplicated 📁large*\n\n`;
-
-  const langAbbrev = { JavaScript: 'JS', TypeScript: 'TS', Python: 'Py', Rust: 'Rs', Java: 'Java', 'C++': 'C++', 'C#': 'C#', Ruby: 'Rb', PHP: 'PHP', Go: 'Go', C: 'C', JSON: 'JSON' };
-  const langs = Object.entries(stats.byLanguage)
-    .sort((a, b) => b[1].lines - a[1].lines)
-    .slice(0, 4)
-    .map(([lang, data]) => `${langAbbrev[lang] || lang.slice(0,4)}:${(data.lines/stats.totalLines*100).toFixed(0)}%`)
-    .join(' ');
-  output += `**Langs:** ${langs}\n\n`;
-
-  const techStack = getTechStack(entities, identifiers);
-  if (techStack) {
-    output += `## 🛠️ Tech Stack\n\n${techStack}\n`;
-  }
-
-  const codePatterns = getCodePatterns(entities);
-  if (codePatterns) {
-    output += `## ⚡ Code Patterns\n\n${codePatterns}\n`;
-  }
-
-  const ioPatterns = getIOPatterns(entities);
-  if (ioPatterns) {
-    output += `## 🔗 I/O & Integration\n\n${ioPatterns}\n`;
-  }
-
-  const features = getFeatures(fileMetrics, identifiers);
-  if (features) {
-    output += `## 🎯 Features\n\n${features}\n`;
-  }
-
-  const codeOrg = getCodeOrganization(fileSizes, funcLengths, funcParams, totalFn, totalCls, stats.files, fileMetrics);
-  if (codeOrg) {
-    output += `## 📊 Code Organization\n\n${codeOrg}\n`;
-  }
-
-  const flow = generateDetailedFlow(depGraph, entities, stats.files, circular);
-  if (flow) {
-    output += `## 🔄 Architecture\n\n${flow}\n`;
-  }
-
-  const apiSurface = getAPISurface(entities, depGraph, fileMetrics);
-  if (apiSurface) {
-    output += `## 🔌 API Surface\n\n${apiSurface}\n`;
-  }
-
-  const issues = getCompactIssues(circular, duplicates, metrics, fileSizes, fileMetrics);
-  if (issues.length > 0) {
-    output += `## 🚨 Issues\n\n`;
-    issues.forEach(issue => output += `- ${issue}\n`);
-    output += '\n';
-  }
-
-  const deadCodeSection = getDeadCodeSection(deadCode);
-  if (deadCodeSection) {
-    output += `## 🧹 Dead Code & Tests\n\n${deadCodeSection}\n`;
-  }
-
-  const modules = getModuleStructure(depGraph, stats.files, fileSizes);
-  if (modules.length > 0) {
-    output += `## 📦 Modules\n\n`;
-    modules.forEach(mod => output += `- ${mod}\n`);
-    output += '\n';
-  }
-
-  const fileIndex = getFileIndex(fileMetrics, depGraph, entities);
-  if (fileIndex) {
-    output += `## 📄 File Index\n\n${fileIndex}\n`;
-  }
-
-  return output.trim();
-}
-
-function generateDetailedFlow(depGraph, entities, totalFiles, circular) {
-  if (!depGraph?.coupling || totalFiles < 3) return '';
-
-  const flow = [];
-  const connections = Array.from(depGraph.coupling.entries())
-    .map(([file, coupling]) => ({
-      file: file.split('/').pop().replace(/\.\w+$/, ''),
-      fullPath: file,
-      dir: file.split('/')[0] || 'root',
-      in: coupling.in,
-      out: coupling.out,
-      total: coupling.in + coupling.out
-    }))
-    .sort((a, b) => b.total - a.total);
-
-  const layeredFlow = buildLayeredFlow(depGraph, connections);
-  if (layeredFlow.length > 0) {
-    flow.push(...layeredFlow);
-  }
-
-  const modules = {};
-  connections.forEach(c => {
-    if (!modules[c.dir]) modules[c.dir] = { count: 0, connections: 0, in: 0, out: 0 };
-    modules[c.dir].count++;
-    modules[c.dir].connections += c.total;
-    modules[c.dir].in += c.in;
-    modules[c.dir].out += c.out;
-  });
-
-  const crossModuleDeps = analyzeCrossModuleDeps(depGraph, modules);
-  if (crossModuleDeps.length > 0) {
-    flow.push(`**Cross-module:** ${crossModuleDeps.slice(0, 6).join(', ')}`);
-  }
-
-  const moduleFlow = buildModuleFlow(modules);
-  if (moduleFlow) {
-    flow.push(`**Module flow:** ${moduleFlow}`);
-  }
-
-  const externals = getTopExternalDeps(entities);
-  if (externals.length > 0) {
-    flow.push(`**External:** ${externals.slice(0, 6).join(', ')}${externals.length > 6 ? ` (+${externals.length - 6})` : ''}`);
-  }
-
-  const specificDeps = buildSpecificDependencies(depGraph, connections);
-  if (specificDeps.length > 0) {
-    flow.push(`**Key deps:** ${specificDeps.slice(0, 8).join(', ')}`);
-  }
-
-  const topHubs = connections.filter(c => c.total >= 5).slice(0, 5);
-  if (topHubs.length > 0) {
-    const hubDesc = topHubs.map(h => `${h.file}(${h.out}↑${h.in}↓)`).join(', ');
-    flow.push(`**Hubs:** ${hubDesc}`);
-  }
-
-  const leaves = connections.filter(c => c.in === 0 && c.out > 0).sort((a, b) => b.out - a.out).slice(0, 8);
-  const totalLeaves = connections.filter(c => c.in === 0 && c.out > 0).length;
-  if (leaves.length > 0 && totalLeaves <= 20) {
-    const leafDesc = leaves.map(l => `${l.file}(${l.out}↑)`).join(', ');
-    flow.push(`**Leaf nodes:** ${leafDesc}${totalLeaves > 8 ? ` (+${totalLeaves - 8})` : ''}`);
-  } else if (totalLeaves > 20) {
-    const topLeaves = leaves.slice(0, 4).map(l => `${l.file}(${l.out}↑)`).join(', ');
-    flow.push(`**Leaf nodes:** ${topLeaves} (+${totalLeaves - 4} entry points)`);
-  }
-
-  const trueOrphans = connections.filter(c => c.total === 0 && !isObviousEntryPoint(c.fullPath));
-  if (trueOrphans.length > 0) {
-    const orphanNames = trueOrphans.slice(0, 6).map(o => o.file).join(', ');
-    flow.push(`**Orphans:** ${orphanNames}${trueOrphans.length > 6 ? ` (+${trueOrphans.length - 6})` : ''}`);
-  }
-
-  const concerns = [];
-  const cycles = circular?.length || 0;
-  const isolated = connections.filter(c => c.total === 0).length;
-  const megaHubs = connections.filter(c => c.total >= 15).length;
-
-  if (cycles > 0) concerns.push(`🔄${cycles} cycles`);
-  if (isolated > 10) concerns.push(`🏝️${isolated} isolated`);
-  if (megaHubs > 0) concerns.push(`🔥${megaHubs} mega-hubs`);
-
-  if (concerns.length > 0) {
-    flow.push(`**Concerns:** ${concerns.join(' ')}`);
-  }
-
-  return flow.join('\n');
-}
-
-function buildLayeredFlow(depGraph, connections) {
-  const layers = [];
-  const nodeMap = new Map();
-
-  connections.forEach(c => nodeMap.set(c.fullPath, c));
-
-  const layer0 = connections.filter(c => c.out === 0 && c.in > 0).sort((a, b) => b.in - a.in).slice(0, 8);
-  if (layer0.length > 0) {
-    const names = layer0.map(n => `${n.file}(${n.in}↓)`).join(', ');
-    layers.push(`**L0 [pure exports]:** ${names}${connections.filter(c => c.out === 0 && c.in > 0).length > 8 ? ` (+${connections.filter(c => c.out === 0 && c.in > 0).length - 8})` : ''}`);
-  }
-
-  const layer1 = connections.filter(c => c.out >= 1 && c.out <= 3 && c.in >= 3).sort((a, b) => b.in - a.in).slice(0, 8);
-  if (layer1.length > 0) {
-    const names = layer1.map(n => `${n.file}(${n.out}↑${n.in}↓)`).join(', ');
-    layers.push(`**L1 [low imports]:** ${names}`);
-  }
-
-  const layer2 = connections.filter(c => c.out >= 4 && c.in >= 2).sort((a, b) => (b.in + b.out) - (a.in + a.out)).slice(0, 8);
-  if (layer2.length > 0) {
-    const names = layer2.map(n => `${n.file}(${n.out}↑${n.in}↓)`).join(', ');
-    layers.push(`**L2 [mid flow]:** ${names}`);
-  }
-
-  const layer3 = connections.filter(c => c.in === 0 && c.out > 0).sort((a, b) => b.out - a.out).slice(0, 8);
-  if (layer3.length > 0) {
-    const names = layer3.map(n => `${n.file}(${n.out}↑)`).join(', ');
-    layers.push(`**L3 [pure imports]:** ${names}${connections.filter(c => c.in === 0 && c.out > 0).length > 8 ? ` (+${connections.filter(c => c.in === 0 && c.out > 0).length - 8})` : ''}`);
-  }
-
-  return layers;
-}
-
-function buildModuleFlow(modules) {
-  const sorted = Object.entries(modules)
-    .filter(([_, data]) => data.in > 0 || data.out > 0)
-    .sort((a, b) => {
-      const aRatio = a[1].out > 0 ? a[1].in / a[1].out : 999;
-      const bRatio = b[1].out > 0 ? b[1].in / b[1].out : 999;
-      return bRatio - aRatio;
-    });
-
-  if (sorted.length === 0) return '';
-
-  const exporters = sorted.filter(([_, d]) => d.in > d.out).slice(0, 3);
-  const importers = sorted.filter(([_, d]) => d.out > d.in).slice(0, 3);
-  const balanced = sorted.filter(([_, d]) => Math.abs(d.in - d.out) <= 2 && d.in > 0 && d.out > 0).slice(0, 2);
-
-  const parts = [];
-  if (exporters.length > 0) {
-    parts.push(exporters.map(([name, d]) => `${name}(${d.out}↑${d.in}↓)`).join('→'));
-  }
-  if (balanced.length > 0) {
-    parts.push(balanced.map(([name, d]) => `${name}(${d.out}↑${d.in}↓)`).join('↔'));
-  }
-  if (importers.length > 0) {
-    parts.push(importers.map(([name, d]) => `${name}(${d.out}↑${d.in}↓)`).join('←'));
-  }
-
-  return parts.join(' | ');
-}
-
-function buildSpecificDependencies(depGraph, connections) {
-  if (!depGraph?.edges || depGraph.edges.length === 0) return [];
-
-  const depCounts = new Map();
-
-  for (const edge of depGraph.edges) {
-    const fromFile = edge.from.split('/').pop().replace(/\.\w+$/, '');
-    const toFile = edge.to.split('/').pop().replace(/\.\w+$/, '');
-    const key = `${fromFile}→${toFile}`;
-    depCounts.set(key, (depCounts.get(key) || 0) + 1);
-  }
-
-  return Array.from(depCounts.entries())
-    .filter(([_, count]) => count >= 1)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 12)
-    .map(([dep]) => dep);
-}
-
-function analyzeCrossModuleDeps(depGraph, moduleStats) {
-  const crossDeps = new Map();
-
-  if (!depGraph?.edges) return [];
-
-  for (const edge of depGraph.edges) {
-    const fromModule = edge.from.split('/')[0] || 'root';
-    const toModule = edge.to.split('/')[0] || 'root';
-
-    if (fromModule !== toModule) {
-      const key = `${fromModule}→${toModule}`;
-      crossDeps.set(key, (crossDeps.get(key) || 0) + 1);
-    }
-  }
-
-  return Array.from(crossDeps.entries())
-    .sort((a, b) => b[1] - a[1])
-    .map(([dep, count]) => `${dep}(${count})`)
-    .slice(0, 5);
-}
-
-// Get top external dependencies
-function getTopExternalDeps(entities) {
-  const externals = new Map();
-  const internalPatterns = ['./', '../', '/src/', '/lib/', '/components/', '/utils/', '/services/', '/functions/'];
-
-  for (const [lang, langEntities] of Object.entries(entities)) {
-    for (const importStatement of langEntities.imports) {
-      let packageName = null;
-      if (importStatement.includes('from ')) {
-        const match = importStatement.match(/from ['"]([^'"]+)['"]/);
-        if (match) packageName = match[1];
-      }
-
-      if (packageName && !internalPatterns.some(pattern => packageName.includes(pattern))) {
-        const isNodeModule = packageName.includes('node_modules') || !packageName.startsWith('.');
-        if (isNodeModule && packageName.split('/').length <= 2) {
-          externals.set(packageName.split('/').shift(), (externals.get(packageName.split('/').shift()) || 0) + 1);
-        }
-      }
-    }
-  }
-
-  return Array.from(externals)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 6)
-    .map(([name]) => name);
-}
-
-function getCompactIssues(circular, duplicates, metrics, fileSizes, fileMetrics) {
-  const issues = [];
-
-  if (circular?.length > 0) {
-    const cycleDesc = circular.slice(0, 2).map(cycle =>
-      cycle.slice(0, 3).map(f => f.split('/').pop().replace(/\.\w+$/, '')).join('→')
-    ).join(' | ');
-    issues.push(`🔄 Circular: ${cycleDesc}${circular.length > 2 ? ` (+${circular.length - 2} cycles)` : ''}`);
-  }
-
-  if (duplicates?.length > 0) {
-    const majorDupes = duplicates.filter(d => d.count >= 3).slice(0, 3);
-    if (majorDupes.length > 0) {
-      const dupeDesc = majorDupes.map(d => {
-        const files = d.instances.slice(0, 2).map(inst => inst.file.split('/').pop()).join(', ');
-        return `${files}(${d.count}×)`;
-      }).join(' | ');
-      issues.push(`📋 Duplication: ${dupeDesc}${duplicates.filter(d => d.count >= 3).length > 3 ? ` (+${duplicates.filter(d => d.count >= 3).length - 3})` : ''}`);
-    }
-  }
-
-  const complexFuncs = [];
-  for (const [file, data] of Object.entries(fileMetrics)) {
-    if (data.functions) {
-      for (const func of data.functions) {
-        if (func.lines > 100) {
-          complexFuncs.push({
-            file: file.split('/').pop(),
-            name: func.name,
-            lines: func.lines,
-            startLine: func.startLine
-          });
-        }
-      }
-    }
-  }
-
-  if (complexFuncs.length > 0) {
-    complexFuncs.sort((a, b) => b.lines - a.lines);
-    const funcList = complexFuncs.slice(0, 4).map(f => `${f.file}:${f.startLine}:${f.name}(${f.lines}L)`).join(', ');
-    issues.push(`🔥 Complex funcs: ${funcList}${complexFuncs.length > 4 ? ` (+${complexFuncs.length - 4})` : ''}`);
-  }
-
-  const largeFiles = fileSizes?.largest?.filter(f => f.lines > 500);
-  if (largeFiles?.length > 0) {
-    const fileNames = largeFiles.slice(0, 3).map(f => `${f.file.split('/').pop()}:${f.lines}L`).join(', ');
-    issues.push(`📁 Large files: ${fileNames}${largeFiles.length > 3 ? ` (+${largeFiles.length - 3})` : ''}`);
-  }
-
-  return issues;
-}
-
-function getFeatures(fileMetrics, identifiers) {
-  const featureAreas = new Map();
-
-  for (const [filePath, metrics] of Object.entries(fileMetrics)) {
-    const fileName = filePath.split('/').pop().replace(/\.\w+$/, '');
-
-    const keywords = [
-      'auth', 'admin', 'marketplace', 'mcp', 'conversation', 'document',
-      'streaming', 'server', 'client', 'api', 'test', 'tool', 'handler',
-      'manager', 'provider', 'service', 'component', 'hook', 'util', 'config'
-    ];
-
-    for (const keyword of keywords) {
-      if (fileName.toLowerCase().includes(keyword) || filePath.toLowerCase().includes(keyword)) {
-        if (!featureAreas.has(keyword)) {
-          featureAreas.set(keyword, { files: [], functions: 0, lines: 0 });
-        }
-        const area = featureAreas.get(keyword);
-        area.files.push(filePath.split('/').pop());
-        area.functions += metrics.functions?.length || 0;
-        area.lines += metrics.loc || 0;
-      }
-    }
-  }
-
-  const sorted = Array.from(featureAreas.entries())
-    .filter(([_, data]) => data.files.length >= 2)
-    .sort((a, b) => b[1].lines - a[1].lines)
-    .slice(0, 8);
-
-  if (sorted.length === 0) return '';
-
-  const featureList = sorted.map(([name, data]) => {
-    const topFiles = [...new Set(data.files)].slice(0, 3).join(', ');
-    return `**${name}:** ${data.files.length}f, ${data.functions}fn (${topFiles})`;
-  }).join('\n');
-
-  return featureList;
-}
-
-function getIOPatterns(entities) {
-  const patterns = [];
-
-  const allEnvVars = new Set();
-  const allUrls = new Set();
-  const allRoutes = [];
-  let totalFetches = 0, totalAxios = 0;
-  let totalSql = 0, totalFileOps = 0, totalJson = 0;
-  let totalEmitters = 0, totalListeners = 0;
-
-  for (const [lang, langEntities] of Object.entries(entities)) {
-    if (langEntities.envVars) {
-      for (const v of langEntities.envVars) allEnvVars.add(v);
-    }
-    if (langEntities.urls) {
-      for (const u of langEntities.urls) allUrls.add(u);
-    }
-    if (langEntities.httpPatterns) {
-      totalFetches += langEntities.httpPatterns.fetches;
-      totalAxios += langEntities.httpPatterns.axios;
-      allRoutes.push(...langEntities.httpPatterns.routes);
-    }
-    if (langEntities.storagePatterns) {
-      totalSql += langEntities.storagePatterns.sql;
-      totalFileOps += langEntities.storagePatterns.fileOps;
-      totalJson += langEntities.storagePatterns.json;
-    }
-    if (langEntities.eventPatterns) {
-      totalEmitters += langEntities.eventPatterns.emitters;
-      totalListeners += langEntities.eventPatterns.listeners;
-    }
-  }
-
-  if (allEnvVars.size > 0) {
-    const vars = Array.from(allEnvVars).slice(0, 8).join(', ');
-    patterns.push(`**Env vars:** ${vars}${allEnvVars.size > 8 ? ` (+${allEnvVars.size - 8})` : ''}`);
-  }
-
-  if (allUrls.size > 0) {
-    const urls = Array.from(allUrls).slice(0, 4).map(u => u.replace(/https?:\/\//, '').slice(0, 30)).join(', ');
-    patterns.push(`**URLs:** ${urls}${allUrls.size > 4 ? ` (+${allUrls.size - 4})` : ''}`);
-  }
-
-  const httpParts = [];
-  if (totalFetches > 0) httpParts.push(`fetch(${totalFetches})`);
-  if (totalAxios > 0) httpParts.push(`axios(${totalAxios})`);
-  if (allRoutes.length > 0) {
-    const routes = [...new Set(allRoutes)].slice(0, 4).join(', ');
-    httpParts.push(`routes: ${routes}`);
-  }
-  if (httpParts.length > 0) {
-    patterns.push(`**HTTP:** ${httpParts.join(', ')}`);
-  }
-
-  const storageParts = [];
-  if (totalSql > 0) storageParts.push(`SQL(${totalSql})`);
-  if (totalFileOps > 0) storageParts.push(`files(${totalFileOps})`);
-  if (totalJson > 0) storageParts.push(`JSON(${totalJson})`);
-  if (storageParts.length > 0) {
-    patterns.push(`**Storage:** ${storageParts.join(', ')}`);
-  }
-
-  if (totalEmitters > 0 || totalListeners > 0) {
-    patterns.push(`**Events:** emit(${totalEmitters}), listen(${totalListeners})`);
-  }
-
-  return patterns.length > 0 ? patterns.join('\n') : '';
-}
-
-function getCodePatterns(entities) {
-  const patterns = [];
-
-  let totalAsync = 0, totalAwait = 0, totalPromise = 0, totalCallback = 0, totalThenCatch = 0;
-  let totalTryCatch = 0, totalThrow = 0;
-  const allErrorTypes = new Set();
-  const allInternalCalls = new Map();
-
-  for (const [lang, langEntities] of Object.entries(entities)) {
-    if (langEntities.asyncPatterns) {
-      totalAsync += langEntities.asyncPatterns.async;
-      totalAwait += langEntities.asyncPatterns.await;
-      totalPromise += langEntities.asyncPatterns.promise;
-      totalCallback += langEntities.asyncPatterns.callback;
-      totalThenCatch += langEntities.asyncPatterns.thenCatch;
-    }
-    if (langEntities.errorPatterns) {
-      totalTryCatch += langEntities.errorPatterns.tryCatch;
-      totalThrow += langEntities.errorPatterns.throw;
-      for (const t of langEntities.errorPatterns.errorTypes) allErrorTypes.add(t);
-    }
-    if (langEntities.internalCalls) {
-      for (const [name, count] of langEntities.internalCalls) {
-        allInternalCalls.set(name, (allInternalCalls.get(name) || 0) + count);
-      }
-    }
-  }
-
-  const asyncParts = [];
-  if (totalAsync > 0) asyncParts.push(`async(${totalAsync})`);
-  if (totalAwait > 0) asyncParts.push(`await(${totalAwait})`);
-  if (totalPromise > 0) asyncParts.push(`Promise(${totalPromise})`);
-  if (totalCallback > 0) asyncParts.push(`callbacks(${totalCallback})`);
-  if (totalThenCatch > 0) asyncParts.push(`.then/.catch(${totalThenCatch})`);
-
-  if (asyncParts.length > 0) {
-    patterns.push(`**Async:** ${asyncParts.join(', ')}`);
-  }
-
-  const errorParts = [];
-  if (totalTryCatch > 0) errorParts.push(`try/catch(${totalTryCatch})`);
-  if (totalThrow > 0) errorParts.push(`throw(${totalThrow})`);
-  if (allErrorTypes.size > 0) {
-    const types = Array.from(allErrorTypes).slice(0, 4).join(', ');
-    errorParts.push(`types: ${types}`);
-  }
-
-  if (errorParts.length > 0) {
-    patterns.push(`**Errors:** ${errorParts.join(', ')}`);
-  }
-
-  const topCalls = Array.from(allInternalCalls.entries())
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 8);
-
-  if (topCalls.length > 0) {
-    const callList = topCalls.map(([name, count]) => `${name}(${count})`).join(', ');
-    patterns.push(`**Internal calls:** ${callList}`);
-  }
-
-  const allConstants = [];
-  const allGlobalState = [];
-  for (const [lang, langEntities] of Object.entries(entities)) {
-    if (langEntities.constants) allConstants.push(...langEntities.constants);
-    if (langEntities.globalState) allGlobalState.push(...langEntities.globalState);
-  }
-
-  if (allConstants.length > 0) {
-    const constList = allConstants.slice(0, 6).map(c => {
-      const val = c.value.replace(/\s+/g, ' ').replace(/[{}\[\]]/g, '').slice(0, 12);
-      return `${c.name}`;
-    }).join(', ');
-    patterns.push(`**Constants:** ${constList}${allConstants.length > 6 ? ` (+${allConstants.length - 6})` : ''}`);
-  }
-
-  if (allGlobalState.length > 0) {
-    const stateList = allGlobalState.slice(0, 6).join(', ');
-    patterns.push(`**Global state:** ${stateList}${allGlobalState.length > 6 ? ` (+${allGlobalState.length - 6})` : ''}`);
-  }
-
-  return patterns.length > 0 ? patterns.join('\n') : '';
-}
-
-function getTechStack(entities, identifiers) {
-  const stack = [];
-
-  const topPatterns = [];
-  for (const [lang, langEntities] of Object.entries(entities)) {
-    if (langEntities.patterns && langEntities.patterns.size > 0) {
-      const patterns = Array.from(langEntities.patterns.entries())
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 8);
-      topPatterns.push(...patterns);
-    }
-  }
-
-  const dedupedPatterns = new Map();
-  topPatterns.forEach(([name, count]) => {
-    dedupedPatterns.set(name, (dedupedPatterns.get(name) || 0) + count);
-  });
-
-  const sortedPatterns = Array.from(dedupedPatterns.entries())
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 6);
-
-  if (sortedPatterns.length > 0) {
-    const patternNames = sortedPatterns.map(([name, count]) => {
-      const shortName = name.length > 20 ? name.slice(0, 17) + '...' : name;
-      return `${shortName}(${count})`;
-    }).join(', ');
-    stack.push(`**Patterns:** ${patternNames}`);
-  }
-
-  const topIdentifiers = Array.from(identifiers.entries())
-    .filter(([name]) => name.length >= 3 && name.length <= 25)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 6);
-
-  if (topIdentifiers.length > 0) {
-    const idNames = topIdentifiers.map(([name, count]) => `${name}(${count})`).join(', ');
-    stack.push(`**Top IDs:** ${idNames}`);
-  }
-
-  return stack.join('\n');
-}
-
-function getCodeOrganization(fileSizes, funcLengths, funcParams, totalFn, totalCls, totalFiles, fileMetrics) {
-  const org = [];
-
-  if (fileSizes?.largest && fileSizes.largest.length > 0) {
-    const largeFiles = fileSizes.largest.filter(f => f.lines >= 200).slice(0, 6);
-    if (largeFiles.length > 0) {
-      const fileList = largeFiles.map(f => `${f.file.split('/').pop()}:${f.lines}L`).join(', ');
-      org.push(`**Large files:** ${fileList}${fileSizes.largest.filter(f => f.lines >= 200).length > 6 ? ` (+${fileSizes.largest.filter(f => f.lines >= 200).length - 6})` : ''}`);
-    }
-  }
-
-  const longFunctions = [];
-  for (const [file, metrics] of Object.entries(fileMetrics)) {
-    if (metrics.functions) {
-      for (const func of metrics.functions) {
-        if (func.lines > 50) {
-          longFunctions.push({
-            file: file.split('/').pop(),
-            name: func.name,
-            lines: func.lines,
-            startLine: func.startLine
-          });
-        }
-      }
-    }
-  }
-
-  if (longFunctions.length > 0) {
-    longFunctions.sort((a, b) => b.lines - a.lines);
-    const funcList = longFunctions.slice(0, 6).map(f => `${f.file}:${f.startLine}:${f.name}(${f.lines}L)`).join(', ');
-    org.push(`**Long funcs:** ${funcList}${longFunctions.length > 6 ? ` (+${longFunctions.length - 6})` : ''}`);
-  }
-
-  const manyParamFuncs = [];
-  for (const [file, metrics] of Object.entries(fileMetrics)) {
-    if (metrics.functions) {
-      for (const func of metrics.functions) {
-        if (func.params > 5) {
-          manyParamFuncs.push({
-            file: file.split('/').pop(),
-            name: func.name,
-            params: func.params,
-            startLine: func.startLine
-          });
-        }
-      }
-    }
-  }
-
-  if (manyParamFuncs.length > 0) {
-    manyParamFuncs.sort((a, b) => b.params - a.params);
-    const paramList = manyParamFuncs.slice(0, 6).map(f => `${f.file}:${f.startLine}:${f.name}(${f.params}p)`).join(', ');
-    org.push(`**Many params:** ${paramList}${manyParamFuncs.length > 6 ? ` (+${manyParamFuncs.length - 6})` : ''}`);
-  }
-
-  const allClasses = [];
-  for (const [file, metrics] of Object.entries(fileMetrics)) {
-    if (metrics.classes && metrics.classes.length > 0) {
-      for (const cls of metrics.classes) {
-        allClasses.push({
-          file: file.split('/').pop(),
-          name: cls.name,
-          startLine: cls.startLine
-        });
-      }
-    }
-  }
-
-  if (allClasses.length > 0) {
-    const classList = allClasses.slice(0, 8).map(c => `${c.file}:${c.startLine}:${c.name}`).join(', ');
-    org.push(`**Classes:** ${classList}${allClasses.length > 8 ? ` (+${allClasses.length - 8})` : ''}`);
-  }
-
-  return org.join('\n');
-}
-
-function getAPISurface(entities, depGraph, fileMetrics) {
-  const surface = [];
-
-  const allFunctions = [];
-  const allClasses = [];
-
-  for (const [lang, langEntities] of Object.entries(entities)) {
-    if (langEntities.functions && langEntities.functions.size > 0) {
-      const fns = Array.from(langEntities.functions.entries())
-        .filter(([sig]) => !sig.includes('anonymous') && !sig.includes('anon'))
-        .sort((a, b) => b[1].count - a[1].count);
-      allFunctions.push(...fns);
-    }
-    if (langEntities.classes && langEntities.classes.size > 0) {
-      const classes = Array.from(langEntities.classes.entries())
-        .sort((a, b) => b[1].count - a[1].count);
-      allClasses.push(...classes);
-    }
-  }
-
-  if (fileMetrics && depGraph?.nodes) {
-    const exportedFuncs = [];
-    for (const [file, metrics] of Object.entries(fileMetrics)) {
-      const node = depGraph.nodes.get(file);
-      const exportedNames = node ? new Set(node.exportedNames || []) : new Set();
-      if (metrics.functions) {
-        for (const func of metrics.functions) {
-          if (func.name && !func.name.includes('anonymous')) {
-            const isExported = exportedNames.has(func.name);
-            exportedFuncs.push({ file, ...func, isExported });
-          }
-        }
-      }
-    }
-    const exported = exportedFuncs.filter(f => f.isExported);
-    const topFuncs = (exported.length > 0 ? exported : exportedFuncs).slice(0, 12);
-    if (topFuncs.length > 0) {
-      const funcList = topFuncs.map(f => `${f.file.split('/').pop()}:${f.startLine}:${f.name}(${f.params}p)`).join(', ');
-      surface.push(`**Exported fns:** ${funcList}${exportedFuncs.length > 12 ? ` (+${exportedFuncs.length - 12})` : ''}`);
-    }
-  }
-
-  if (allClasses.length > 0) {
-    const topClasses = allClasses.slice(0, 6).map(([name, data]) => `${name}(${data.count})`).join(', ');
-    surface.push(`**Classes:** ${topClasses}${allClasses.length > 6 ? ` (+${allClasses.length - 6})` : ''}`);
-  }
-
-  if (depGraph?.entryPoints && depGraph.entryPoints.size > 0) {
-    const entries = Array.from(depGraph.entryPoints)
-      .slice(0, 5)
-      .map(e => e.split('/').pop().replace(/\.\w+$/, ''))
-      .join(', ');
-    surface.push(`**Entry files:** ${entries}${depGraph.entryPoints.size > 5 ? ` (+${depGraph.entryPoints.size - 5})` : ''}`);
-  }
-
-  return surface.length > 0 ? surface.join('\n') : '';
-}
-
-function getModuleStructure(depGraph, totalFiles, fileSizes) {
-  if (!depGraph?.coupling || totalFiles < 5) return [];
-
-  const modules = new Map();
-  let totalConnections = 0;
-
-  for (const [file, coupling] of depGraph.coupling) {
-    const module = file.split('/')[0] || 'root';
-    if (!modules.has(module)) {
-      modules.set(module, { files: 0, connections: 0, imports: 0, exports: 0, lines: 0 });
-    }
-
-    const mod = modules.get(module);
-    mod.files++;
-    mod.connections += coupling.in + coupling.out;
-    mod.imports += coupling.out;
-    mod.exports += coupling.in;
-    totalConnections += coupling.in + coupling.out;
-  }
-
-  if (fileSizes?.largest) {
-    for (const { file, lines } of fileSizes.largest) {
-      const module = file.split('/')[0] || 'root';
-      if (modules.has(module)) {
-        modules.get(module).lines += lines;
-      }
-    }
-  }
-
-  return Array.from(modules.entries())
-    .map(([name, data]) => ({
-      name,
-      ...data,
-      pct: totalConnections > 0 ? (data.connections / totalConnections * 100).toFixed(0) : 0,
-      avgLines: data.files > 0 ? Math.round(data.lines / data.files) : 0
-    }))
-    .sort((a, b) => b.connections - a.connections)
-    .slice(0, 6)
-    .map(m => {
-      const parts = [`${m.name}: ${m.files}f, ${m.connections}cx`];
-      if (m.avgLines > 0) parts.push(`~${m.avgLines}L/f`);
-      if (m.imports > 0) parts.push(`${m.imports}↑`);
-      if (m.exports > 0) parts.push(`${m.exports}↓`);
-      return parts.join(', ');
-    });
-}
-
-// Check if file is obviously an entry point
-function isObviousEntryPoint(filename) {
-  const entryPatterns = [
-    'index.', 'main.', 'app.', 'server.', 'client.', 'start.',
-    'cli.', 'bin.', 'boot.', 'init.', 'entry.'
+const DEFAULT_BUDGET = 3000;
+const MAX_DEPTH = 4;
+const CHILD_LIMIT = 6;
+const LEGEND = 'legend: ×n occurrences · ↺ already shown · cx avg complexity · fn functions · cls classes · +n more';
+const LANGUAGE_NAMES = {
+  JavaScript: 'JS', JSX: 'JSX', TypeScript: 'TS', TSX: 'TSX', Python: 'Py', Rust: 'Rs', Go: 'Go',
+  Java: 'Java', 'C#': 'C#', 'C++': 'C++', C: 'C', Ruby: 'Rb', PHP: 'PHP'
+};
+
+export function formatUltraCompact(overview, { budget = DEFAULT_BUDGET } = {}) {
+  const sections = [
+    ['Architecture', architectureLines(overview)],
+    ['Issues', issueLines(overview)],
+    ['Dead code', deadCodeLines(overview)],
+    ['Calls', callLines(overview)],
+    ['Dependencies', dependencyLines(overview)],
+    ['I/O', ioLines(overview)],
+    ['Patterns', patternLines(overview)],
+    ['Core symbols', symbolLines(overview)]
   ];
-  return entryPatterns.some(pattern => filename.includes(pattern));
+  return assemble(headerLines(overview), sections, budget > 0 ? budget : Infinity);
 }
 
-// Analyze the import/export flow pattern
-function analyzeFlowPattern(connections, entries) {
-  if (connections.length < 3) return '';
-
-  const totalImports = connections.reduce((sum, c) => sum + c.in, 0);
-  const totalExports = connections.reduce((sum, c) => sum + c.out, 0);
-
-  // Determine the dominant flow pattern
-  if (entries.length >= 2) {
-    return 'Multi-entry system';
-  } else if (entries.length === 1) {
-    const hubCount = connections.filter(c => c.total >= 5).length;
-    if (hubCount >= 2) {
-      return 'Hub-and-spoke architecture';
-    } else {
-      return 'Linear flow system';
-    }
-  } else {
-    // No clear entry points
-    const highlyConnected = connections.filter(c => c.total >= 5).length;
-    if (highlyConnected > 0) {
-      return 'Decentralized modules';
-    } else {
-      return 'Isolated components';
+function assemble(header, sections, limit) {
+  const blocks = [header.join('\n')];
+  let used = blocks[0].length;
+  for (const [title, lines] of sections) {
+    const block = fitSection(title, lines, limit - used - 2);
+    if (block) {
+      blocks.push(block);
+      used += block.length + 2;
     }
   }
+  if (used + LEGEND.length + 2 <= limit) blocks.push(LEGEND);
+  return blocks.join('\n\n');
 }
 
-function getQuickStart(projectContext) {
-  if (!projectContext) return '';
-
-  const cmds = [];
-
-  if (projectContext.type === 'cli' && projectContext.name) {
-    cmds.push(`\`npx ${projectContext.name}\``);
+function fitSection(title, lines, remaining) {
+  let block = `## ${title}`;
+  if (block.length > remaining) return '';
+  for (const line of lines) {
+    const next = `${block}\n${line}`;
+    if (next.length > remaining) break;
+    block = next;
   }
-
-  const scripts = projectContext.scripts || {};
-
-  if (scripts.dev) cmds.push(`\`npm run dev\``);
-  else if (scripts.start) cmds.push(`\`npm start\``);
-
-  if (scripts.build) cmds.push(`\`npm run build\``);
-  if (scripts.test) cmds.push(`\`npm test\``);
-
-  if (cmds.length === 0) return '';
-
-  return cmds.join(' | ');
+  return block.includes('\n') ? block : '';
 }
 
-function getProjectInfo(projectContext) {
-  if (!projectContext) return '';
-
-  const lines = [];
-
-  if (projectContext.name || projectContext.description) {
-    const nameVer = projectContext.name ? `**${projectContext.name}**` + (projectContext.version ? ` v${projectContext.version}` : '') : '';
-    const typeStr = projectContext.type && projectContext.type !== 'unknown' ? ` (${projectContext.type})` : '';
-    if (nameVer) lines.push(nameVer + typeStr);
-    if (projectContext.description) lines.push(projectContext.description);
-  }
-
-  if (projectContext.readme && !projectContext.description) {
-    lines.push(projectContext.readme.slice(0, 200));
-  }
-
-  const meta = [];
-  if (projectContext.framework) meta.push(projectContext.framework);
-  if (projectContext.runtime) meta.push(projectContext.runtime);
-
-  const deps = Object.keys(projectContext.dependencies || {});
-  const keyDeps = [];
-  if (deps.includes('express')) keyDeps.push('Express');
-  if (deps.includes('fastify')) keyDeps.push('Fastify');
-  if (deps.includes('@supabase/supabase-js')) keyDeps.push('Supabase');
-  if (deps.includes('firebase')) keyDeps.push('Firebase');
-  if (deps.includes('prisma')) keyDeps.push('Prisma');
-  if (deps.includes('mongoose')) keyDeps.push('MongoDB');
-  if (deps.includes('tree-sitter')) keyDeps.push('tree-sitter');
-  if (deps.includes('playwright')) keyDeps.push('Playwright');
-  if (deps.includes('puppeteer')) keyDeps.push('Puppeteer');
-
-  if (keyDeps.length > 0) meta.push(...keyDeps);
-
-  if (meta.length > 0) lines.push(`Tech: ${meta.join(', ')}`);
-
-  return lines.join('\n');
+function more(total, shown) {
+  return total > shown ? ` +${total - shown}` : '';
 }
 
-function getDeadCodeSection(deadCode) {
-  if (!deadCode) return '';
-
-  const sections = [];
-
-  if (deadCode.testFiles?.length > 0) {
-    const testList = deadCode.testFiles.slice(0, 6).map(f => f.split('/').pop()).join(', ');
-    sections.push(`**Test files:** ${testList}${deadCode.testFiles.length > 6 ? ` (+${deadCode.testFiles.length - 6})` : ''}`);
-  }
-
-  if (deadCode.unusedExports?.length > 0) {
-    const unusedList = deadCode.unusedExports.slice(0, 4).map(item => {
-      const fileName = item.file.split('/').pop();
-      const exports = item.exports.join(', ');
-      return `${fileName}(${exports})`;
-    }).join(', ');
-    sections.push(`**Unused exports:** ${unusedList}${deadCode.unusedExports.length > 4 ? ` (+${deadCode.unusedExports.length - 4})` : ''}`);
-  }
-
-  if (deadCode.orphanedFiles?.length > 0) {
-    const orphanList = deadCode.orphanedFiles.slice(0, 6).map(f => f.split('/').pop()).join(', ');
-    sections.push(`**Orphaned:** ${orphanList}${deadCode.orphanedFiles.length > 6 ? ` (+${deadCode.orphanedFiles.length - 6})` : ''}`);
-  }
-
-  if (deadCode.possiblyDead?.length > 0) {
-    const possiblyList = deadCode.possiblyDead.slice(0, 3).map(item => {
-      const fileName = item.file.split('/').pop();
-      const usedBy = item.usedBy.split('/').pop();
-      return `${fileName}←${usedBy}`;
-    }).join(', ');
-    sections.push(`**Single use:** ${possiblyList}${deadCode.possiblyDead.length > 3 ? ` (+${deadCode.possiblyDead.length - 3})` : ''}`);
-  }
-
-  return sections.join('\n');
-}
-
-function getFileIndex(fileMetrics, depGraph, entities) {
-  if (!fileMetrics || Object.keys(fileMetrics).length < 2) return '';
-
-  const totalFiles = Object.keys(fileMetrics).length;
-  const limit = totalFiles <= 30 ? totalFiles : 30;
-
-  const files = Object.entries(fileMetrics)
-    .filter(([path]) => !path.includes('.json') && !path.includes('.test.') && !path.includes('.spec.'))
-    .map(([path, metrics]) => {
-      const coupling = depGraph?.coupling?.get(path);
-      const node = depGraph?.nodes?.get(path);
-      const exportedNames = node ? Array.from(node.exportedNames || []) : [];
-      const importsFrom = node ? Array.from(node.importsFrom || []) : [];
-      const allFuncs = metrics.functions?.map(f => f.name).filter(n => n && !n.includes('anonymous')) || [];
-      const classes = metrics.classes?.map(c => c.name) || [];
-      const inCount = coupling?.in || 0;
-      const outCount = coupling?.out || 0;
-
-      const parts = [`**${path}**`];
-      if (metrics.loc) parts.push(`${metrics.loc}L`);
-      if (outCount > 0) parts.push(`${outCount}↑`);
-      if (inCount > 0) parts.push(`${inCount}↓`);
-
-      const syms = [...classes.map(c => `[${c}]`), ...exportedNames.filter(e => !classes.includes(e))].slice(0, 6);
-      if (syms.length > 0) {
-        parts.push(`exports: ${syms.join(', ')}`);
-      } else if (allFuncs.length > 0) {
-        parts.push(`fn: ${allFuncs.slice(0, 5).join(', ')}`);
-      }
-
-      if (inCount >= 3 && importsFrom.length > 0) {
-        const fromNames = importsFrom.slice(0, 3).map(f => f.split('/').pop().replace(/\.\w+$/, ''));
-        parts.push(`uses: ${fromNames.join(', ')}`);
-      }
-
-      return { line: parts.join(' '), total: inCount + outCount };
-    })
-    .sort((a, b) => b.total - a.total)
-    .slice(0, limit)
-    .map(f => f.line);
-
-  if (files.length === 0) return '';
-
-  return files.join('\n');
+function listed(items, limit) {
+  const list = [...items];
+  return list.slice(0, limit).join(', ') + more(list.length, limit);
 }
 
 function k(num) {
   return num >= 1000 ? `${(num / 1000).toFixed(1)}k` : num;
+}
+
+function headerLines({ project, stats, deadCode }) {
+  const tags = [project.type, project.moduleType].filter(Boolean);
+  const title = `# ${project.name}${project.version ? ` ${project.version}` : ''}${tags.length ? ` (${tags.join(', ')})` : ''}`;
+  const lines = [title];
+
+  const description = project.description ?? project.readme;
+  if (description) lines.push(description.slice(0, 160));
+
+  const bins = Object.keys(project.bin);
+  if (bins.length) lines.push(`bin: ${bins.join(', ')}`);
+
+  const scripts = Object.entries(project.scripts).slice(0, 3).map(([name, command]) => `${name}=${String(command).slice(0, 50)}`);
+  if (scripts.length) lines.push(`scripts: ${scripts.join(' · ')}`);
+
+  const tests = deadCode.tests.slice(0, 3).join(', ') + more(deadCode.tests.length, 3);
+  lines.push(`tests: ${tests || 'none'}${project.testScript ? '' : ' (no test script)'}`);
+  lines.push(statsLine(stats));
+  return lines;
+}
+
+function statsLine(stats) {
+  const total = stats.languages.reduce((sum, [, lines]) => sum + lines, 0) || 1;
+  const shares = stats.languages.slice(0, 3).map(([lang, lines]) => `${LANGUAGE_NAMES[lang] ?? lang} ${Math.round(lines / total * 100)}%`);
+  const complexity = stats.functions ? (stats.complexity / stats.functions).toFixed(1) : '0';
+  return [`${stats.files} files`, `${k(stats.lines)} lines`, `${stats.functions} fn`, `${stats.classes} cls`, `cx ${complexity}`, ...shares].join(' · ');
+}
+
+function architectureLines({ nodes, roots }) {
+  const lines = [];
+  const shown = new Set();
+
+  const walk = (path, depth) => {
+    const node = nodes.get(path);
+    const revisit = shown.has(path);
+    const exported = [...node.exportedNames];
+    const names = exported.length ? `(${exported.slice(0, 3).join(', ')}${more(exported.length, 3)})` : '';
+    lines.push(`${'  '.repeat(depth)}${path}${names}${revisit ? ' ↺' : ''}`);
+    if (revisit || depth >= MAX_DEPTH) return;
+    shown.add(path);
+    const children = [...node.importsFrom].sort((a, b) => nodes.get(b).importsFrom.size - nodes.get(a).importsFrom.size || a.localeCompare(b));
+    for (const child of children.slice(0, CHILD_LIMIT)) walk(child, depth + 1);
+    if (children.length > CHILD_LIMIT) lines.push(`${'  '.repeat(depth + 1)}+${children.length - CHILD_LIMIT} more`);
+  };
+
+  for (const root of roots) walk(root, 0);
+  return lines;
+}
+
+function issueLines({ cycles, functions, files, duplicates, errors, scan }) {
+  const lines = [];
+  if (scan.truncated) lines.push(`scan: stopped at ${scan.limit} files, the rest was not read`);
+  if (cycles.length) {
+    lines.push(`cycles: ${cycles.slice(0, 2).map(cycle => cycle.join(' → ')).join(' | ')}${more(cycles.length, 2)}`);
+  }
+  const complex = functions.filter(fn => fn.name && fn.lines >= 80).sort((a, b) => b.lines - a.lines);
+  if (complex.length) {
+    lines.push(`complex: ${complex.slice(0, 3).map(fn => `${fn.file}:${fn.startLine} ${fn.name} (${fn.lines}L)`).join(', ')}${more(complex.length, 3)}`);
+  }
+  const large = files.filter(file => file.lines >= 400).sort((a, b) => b.lines - a.lines);
+  if (large.length) {
+    lines.push(`large: ${large.slice(0, 3).map(file => `${file.path} (${file.lines}L)`).join(', ')}${more(large.length, 3)}`);
+  }
+  const params = functions.filter(fn => fn.name && fn.params >= 6).sort((a, b) => b.params - a.params);
+  if (params.length) {
+    lines.push(`params: ${params.slice(0, 3).map(fn => `${fn.file}:${fn.startLine} ${fn.name} (${fn.params})`).join(', ')}${more(params.length, 3)}`);
+  }
+  if (duplicates.length) {
+    lines.push(`duplicates: ${duplicates.slice(0, 2).map(group => `${group[0].name}×${group.length} (${[...new Set(group.map(fn => fn.file))].join(', ')})`).join(' | ')}`);
+  }
+  if (errors.length) lines.push(`parse errors: ${errors.length} (${errors[0].file}: ${errors[0].error})`);
+  return lines;
+}
+
+function deadCodeLines({ deadCode }) {
+  const lines = [];
+  if (deadCode.unusedExports.length) {
+    const items = deadCode.unusedExports.slice(0, 6).map(({ file, names }) => `${file}(${names.slice(0, 3).join(', ')}${more(names.length, 3)})`);
+    lines.push(`unused exports: ${items.join(', ')}${more(deadCode.unusedExports.length, 6)}`);
+  }
+  if (deadCode.orphans.length) lines.push(`orphans: ${deadCode.orphans.slice(0, 8).join(', ')}${more(deadCode.orphans.length, 8)}`);
+  return lines;
+}
+
+function callLines({ calls }) {
+  const lines = [];
+  const rows = [...calls.callees]
+    .map(([caller, callees]) => [caller, [...callees]])
+    .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+  for (const [caller, callees] of rows.slice(0, 5)) {
+    lines.push(`${caller} → ${callees.slice(0, 5).join(', ')}${more(callees.length, 5)}`);
+  }
+  const hot = [...calls.callers]
+    .filter(([, callers]) => callers.size >= 2)
+    .sort((a, b) => b[1].size - a[1].size || a[0].localeCompare(b[0]))
+    .slice(0, 4);
+  if (hot.length) lines.push(`most called: ${hot.map(([name, callers]) => `${name}×${callers.size}`).join(', ')}`);
+  return lines;
+}
+
+function packageSummary(packages) {
+  const names = [...packages.keys()];
+  const families = names.filter(name => names.filter(other => other.startsWith(`${name}-`)).length >= 2);
+  const familyMembers = names.filter(name => families.some(root => name.startsWith(`${root}-`)));
+  const entries = names
+    .filter(name => !familyMembers.includes(name))
+    .map(name => ({ name, label: `${name}×${packages.get(name).size}`, weight: packages.get(name).size }));
+  for (const root of families) {
+    const members = names.filter(name => name.startsWith(`${root}-`));
+    const files = new Set(members.flatMap(name => [...packages.get(name)]));
+    entries.push({ name: root, label: `${root}-*×${members.length}`, weight: files.size });
+  }
+  return entries.sort((a, b) => b.weight - a.weight || a.name.localeCompare(b.name)).map(entry => entry.label);
+}
+
+function distinctUrls(urls) {
+  const bases = [...urls].map(url => url.replace(/\.git$/, '').replace(/#.*$/, '')).sort((a, b) => a.length - b.length);
+  const kept = [];
+  for (const url of bases) {
+    if (!kept.some(base => url.startsWith(`${base}/`) && pathSegments(base) >= 2)) kept.push(url);
+  }
+  return [...new Set(kept)];
+}
+
+function pathSegments(url) {
+  try {
+    return new URL(url).pathname.split('/').filter(Boolean).length;
+  } catch {
+    return 0;
+  }
+}
+
+function dependencyLines({ externals, project }) {
+  const lines = [];
+  const summary = packageSummary(externals.packages);
+  if (summary.length) lines.push(`external: ${summary.slice(0, 8).join(', ')}${more(summary.length, 8)}`);
+  if (externals.builtins.size) lines.push(`builtins: ${[...externals.builtins].sort().join(', ')}`);
+  const used = new Set(externals.packages.keys());
+  const unused = Object.keys(project.dependencies).filter(name => !used.has(name));
+  if (unused.length) lines.push(`unused deps: ${unused.join(', ')}`);
+  return lines;
+}
+
+function ioLines({ io }) {
+  const lines = [];
+  if (io.envVars.size) lines.push(`env: ${listed(io.envVars, 8)}`);
+  const urls = distinctUrls(io.urls);
+  if (urls.length) lines.push(`urls: ${urls.slice(0, 3).join(', ')}${more(urls.length, 3)}`);
+  const http = [
+    io.fetches && `fetch×${io.fetches}`,
+    io.axios && `axios×${io.axios}`,
+    io.routes.size && `routes ${listed(io.routes, 4)}`
+  ].filter(Boolean);
+  if (http.length) lines.push(`http: ${http.join(', ')}`);
+  const storage = [io.sql && `sql×${io.sql}`, io.fileOps && `files×${io.fileOps}`, io.json && `json×${io.json}`].filter(Boolean);
+  if (storage.length) lines.push(`storage: ${storage.join(', ')}`);
+  const events = [io.listeners && `listen×${io.listeners}`, io.emitters && `emit×${io.emitters}`].filter(Boolean);
+  if (events.length) lines.push(`events: ${events.join(', ')}`);
+  return lines;
+}
+
+function patternLines({ patterns }) {
+  const lines = [];
+  const asynchrony = [
+    ['async', patterns.async],
+    ['await', patterns.await],
+    ['promise', patterns.promise],
+    ['then/catch', patterns.thenCatch]
+  ].filter(([, count]) => count > 0).map(([label, count]) => `${label}×${count}`);
+  if (asynchrony.length) lines.push(`async: ${asynchrony.join(', ')}`);
+
+  const errors = [['try', patterns.tryCatch], ['throw', patterns.throws]]
+    .filter(([, count]) => count > 0)
+    .map(([label, count]) => `${label}×${count}`);
+  if (patterns.errorTypes.size) errors.push(listed(patterns.errorTypes, 4));
+  if (errors.length) lines.push(`errors: ${errors.join(', ')}`);
+
+  if (patterns.constants.size) lines.push(`constants: ${listed(patterns.constants, 6)}`);
+  if (patterns.globals.size) lines.push(`globals: ${listed(patterns.globals, 6)}`);
+  return lines;
+}
+
+function symbolLines({ symbols }) {
+  if (symbols.length === 0) return [];
+  return [`core: ${symbols.slice(0, 8).map(([name, count]) => `${name}×${count}`).join(', ')}`];
 }

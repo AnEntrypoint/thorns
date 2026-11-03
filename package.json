@@ -26,7 +26,8 @@
     "one-liner.sh"
   ],
   "scripts": {
-    "analyze": "node index.js"
+    "analyze": "node index.js",
+    "test": "node verify-setup.mjs && node verify-overview.mjs"
   },
   "bun": {
     "bin": {

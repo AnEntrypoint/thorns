@@ -10,3 +10,4 @@ coverage/
 
 .code-search/
 config.bat
+runs/

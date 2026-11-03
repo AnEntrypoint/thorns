@@ -1,6 +1,6 @@
 import Parser from 'tree-sitter';
 import { readFileSync, readdirSync, statSync, existsSync } from 'fs';
-import { join, extname, relative } from 'path';
+import { join, extname, relative, sep, basename, resolve } from 'path';
 import JavaScript from 'tree-sitter-javascript';
 import TypeScript from 'tree-sitter-typescript';
 import Python from 'tree-sitter-python';
@@ -13,10 +13,10 @@ import CSharp from 'tree-sitter-c-sharp';
 import Ruby from 'tree-sitter-ruby';
 import PHP from 'tree-sitter-php';
 import JSONParser from 'tree-sitter-json';
-import { extractEntities, calculateMetrics } from './analyzer.js';
+import { extractEntities } from './analyzer.js';
 import { formatUltraCompact } from './compact-formatter.js';
-import { extractDependencies, buildDependencyGraph, analyzeModules } from './dependency-analyzer.js';
-import { extractAdvancedMetrics, detectDuplication, hashFunction, detectCircularDeps, analyzeFileSizes } from './advanced-metrics.js';
+import { extractDependencies, buildDependencyGraph, isBuiltin } from './dependency-analyzer.js';
+import { detectDuplication, detectCircularDeps } from './advanced-metrics.js';
 import { buildIgnoreSet, shouldIgnore } from './ignore-parser.js';
 
 const LANGUAGES = {
@@ -39,499 +39,313 @@ const LANGUAGES = {
   '.cs': { parser: CSharp, name: 'C#' },
   '.rb': { parser: Ruby, name: 'Ruby' },
   '.php': { parser: PHP, name: 'PHP' },
-  '.json': { parser: JSONParser, name: 'JSON' }
+  '.json': { parser: JSONParser, name: 'JSON', data: true }
 };
 
-const MAX_FILE_SIZE = 200 * 1024; // 200KB - anything larger is build/generated code
+const MAX_FILE_SIZE = 200 * 1024;
+const MAX_FILES = 8000;
+const PARSE_CHUNK = 8192;
+const ENTRY_NAMES = new Set(['index', 'main', 'app', 'server', 'cli', 'lib', 'bin', '__main__', '__init__']);
+const TEST_PATH = /(^|\/)(tests?|__tests__|specs?)\/|(^|[\/._-])(test|tests|spec|specs|verify)([._-]|$)|\.(test|spec)\./;
+const CONFIG_PATH = /(^|\/)\.[^/]*$|\.config\.|(^|[\/._-])config\.(js|ts|mjs|cjs)$/;
+const README_NAMES = ['README.md', 'readme.md', 'README.txt', 'README'];
 
 function getLanguage(filepath) {
-  const ext = extname(filepath);
-  return LANGUAGES[ext];
+  return LANGUAGES[extname(filepath)];
 }
 
 function* walkDir(dir, baseDir = dir, ignorePatterns = new Set()) {
-  const entries = readdirSync(dir, { withFileTypes: true });
-  for (const entry of entries) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const fullPath = join(dir, entry.name);
-    const relativePath = relative(baseDir, fullPath);
+    const relativePath = relative(baseDir, fullPath).split(sep).join('/');
 
-    // Check if path should be ignored
-    if (shouldIgnore(relativePath, ignorePatterns) || shouldIgnore(entry.name, ignorePatterns)) {
-      continue;
-    }
+    if (shouldIgnore(relativePath, ignorePatterns) || shouldIgnore(entry.name, ignorePatterns)) continue;
 
     if (entry.isDirectory()) {
-      yield* walkDir(fullPath, baseDir, ignorePatterns);
+      if (!existsSync(join(fullPath, 'pyvenv.cfg'))) yield* walkDir(fullPath, baseDir, ignorePatterns);
     } else if (entry.isFile()) {
       const lang = getLanguage(entry.name);
-      if (lang) {
-        try {
-          const stat = statSync(fullPath);
-          if (stat.size <= MAX_FILE_SIZE) {
-            yield { path: fullPath, relativePath, lang };
-          }
-        } catch (e) {}
-      }
+      if (!lang) continue;
+      try {
+        if (statSync(fullPath).size <= MAX_FILE_SIZE) yield { path: fullPath, relativePath, lang };
+      } catch {}
     }
   }
 }
 
-function extractFunctionName(node) {
-  for (const child of node.children) {
-    if (child.type === 'identifier' || child.type === 'property_identifier') {
-      return child.text;
-    }
-  }
-  return 'anonymous';
+function projectType(pkg) {
+  const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+  if (['next', 'react', 'vite'].some(name => name in deps)) return 'web-app';
+  if ('express' in deps) return 'server';
+  if (pkg.bin) return 'cli';
+  if (pkg.main || pkg.exports) return 'library';
+  return null;
 }
 
-function extractClassName(node) {
-  for (const child of node.children) {
-    if (child.type === 'identifier' || child.type === 'type_identifier') {
-      return child.text;
-    }
-  }
-  return 'Anonymous';
+function normalizeBin(pkg) {
+  if (!pkg.bin) return {};
+  return typeof pkg.bin === 'string' ? { [pkg.name]: pkg.bin } : pkg.bin;
 }
 
-function countNodeParams(node) {
-  let count = 0;
-  function traverse(n) {
-    if (n.type === 'parameter' || n.type === 'formal_parameter' || n.type.includes('param')) {
-      count++;
-    }
-    for (const child of n.children) traverse(child);
-  }
-  traverse(node);
-  return count;
-}
-
-function analyzeTree(tree, sourceCode) {
-  const stats = {
-    functions: 0,
-    classes: 0,
-    imports: 0,
-    exports: 0,
-    complexity: 0,
-    lines: sourceCode.split('\n').length
-  };
-
-  function traverse(node) {
-    const type = node.type;
-
-    if (type.includes('function') && type.includes('declaration')) stats.functions++;
-    if (type.includes('class') && type.includes('declaration')) stats.classes++;
-    if (type.includes('import')) stats.imports++;
-    if (type.includes('export')) stats.exports++;
-    if (['if_statement', 'while_statement', 'for_statement', 'case_statement', 'catch_clause'].includes(type)) {
-      stats.complexity++;
-    }
-
-    for (let child of node.children) {
-      traverse(child);
-    }
-  }
-
-  traverse(tree.rootNode);
-  return stats;
-}
-
-function detectDeadCode(depGraph, fileMetrics, projectContext) {
-  const deadCode = {
-    unusedExports: [],
-    testFiles: [],
-    orphanedFiles: [],
-    possiblyDead: []
-  };
-
-  if (!depGraph?.nodes) return deadCode;
-
-  const reExporters = new Set();
-  for (const [file, node] of depGraph.nodes) {
-    if (node.importsFrom.size > 0 && node.exportedNames.size > 0) {
-      const fileName = file.split('/').pop();
-      if (fileName.includes('index.') || fileName.includes('lib.') || fileName.includes('main.')) {
-        reExporters.add(file);
-        for (const imported of node.importsFrom) {
-          const targetNode = depGraph.nodes.get(imported);
-          if (targetNode) {
-            targetNode.importedBy.add(file + ':reexport');
-          }
-        }
-      }
-    }
-  }
-
-  for (const [file, node] of depGraph.nodes) {
-    const fileName = file.split('/').pop();
-    const isTest = fileName.includes('.test.') || fileName.includes('.spec.') ||
-                   file.includes('/test/') || file.includes('/__tests__/');
-
-    if (isTest) {
-      deadCode.testFiles.push(file);
-      continue;
-    }
-
-    const realImporters = Array.from(node.importedBy).filter(i => !i.includes(':reexport'));
-    const hasReExporter = Array.from(node.importedBy).some(i => i.includes(':reexport'));
-
-    if (realImporters.length === 0 && !hasReExporter && node.exportedNames.size > 0) {
-      const isEntry = fileName.includes('index.') || fileName.includes('main.') ||
-                     fileName.includes('app.') || fileName.includes('server.') ||
-                     fileName.includes('lib.') || fileName.includes('cli.');
-      const isConfig = fileName.includes('config') || fileName.includes('.config.');
-
-      if (!isEntry && !isConfig) {
-        deadCode.unusedExports.push({
-          file,
-          exports: Array.from(node.exportedNames).slice(0, 3)
-        });
-      }
-    }
-
-    if (node.importedBy.size === 0 && node.importsFrom.size === 0) {
-      const isEntry = fileName.includes('index.') || fileName.includes('main.') ||
-                     fileName.includes('app.') || fileName.includes('server.') ||
-                     fileName.includes('lib.') || fileName.includes('cli.');
-      if (!isEntry) {
-        deadCode.orphanedFiles.push(file);
-      }
-    }
-
-    if (realImporters.length === 1 && node.importsFrom.size === 0 && !hasReExporter) {
-      deadCode.possiblyDead.push({
-        file,
-        usedBy: realImporters[0]
-      });
-    }
-  }
-
-  return deadCode;
+function firstParagraph(text) {
+  const paragraph = text.split(/\n\s*\n/).map(part => part.trim()).find(part => part && !part.startsWith('#') && !part.startsWith('```'));
+  return paragraph ? paragraph.replace(/\s+/g, ' ').slice(0, 160) : null;
 }
 
 function analyzeProjectContext(rootPath) {
-  const context = {
-    type: 'unknown',
-    framework: null,
-    runtime: null,
-    packageManager: null,
+  const project = {
+    name: basename(resolve(rootPath)),
+    version: null,
+    description: null,
+    type: null,
+    moduleType: null,
+    bin: {},
+    main: null,
     scripts: {},
     dependencies: {},
-    devDependencies: {},
-    entry: null,
-    build: null,
-    test: null,
-    name: null,
-    description: null,
-    version: null,
+    testScript: null,
     readme: null
   };
 
-  try {
-    const packagePath = join(rootPath, 'package.json');
-    if (existsSync(packagePath)) {
+  const packagePath = join(rootPath, 'package.json');
+  if (existsSync(packagePath)) {
+    try {
       const pkg = JSON.parse(readFileSync(packagePath, 'utf8'));
-      context.name = pkg.name;
-      context.description = pkg.description;
-      context.version = pkg.version;
-      context.scripts = pkg.scripts || {};
-      context.dependencies = pkg.dependencies || {};
-      context.devDependencies = pkg.devDependencies || {};
+      Object.assign(project, {
+        name: pkg.name ?? project.name,
+        version: pkg.version ?? null,
+        description: pkg.description ?? null,
+        type: projectType(pkg),
+        moduleType: pkg.type === 'module' ? 'ESM' : 'CJS',
+        bin: normalizeBin(pkg),
+        main: pkg.main ?? null,
+        scripts: pkg.scripts ?? {},
+        dependencies: pkg.dependencies ?? {},
+        testScript: pkg.scripts?.test ?? null
+      });
+    } catch {}
+  }
 
-      if (pkg.dependencies?.next || pkg.devDependencies?.next) {
-        context.framework = 'Next.js';
-        context.type = 'web-app';
-      } else if (pkg.dependencies?.react || pkg.devDependencies?.react) {
-        context.framework = 'React';
-        context.type = 'web-app';
-      } else if (pkg.dependencies?.vite || pkg.devDependencies?.vite) {
-        context.framework = 'Vite';
-        context.type = 'web-app';
-      } else if (pkg.dependencies?.express || pkg.devDependencies?.express) {
-        context.framework = 'Express';
-        context.type = 'server';
-      } else if (pkg.bin) {
-        context.type = 'cli';
-      } else if (pkg.main || pkg.exports) {
-        context.type = 'library';
+  const readmePath = README_NAMES.map(name => join(rootPath, name)).find(existsSync);
+  if (readmePath) project.readme = firstParagraph(readFileSync(readmePath, 'utf8'));
+
+  return project;
+}
+
+function addToSet(map, key, value) {
+  if (!map.has(key)) map.set(key, new Set());
+  map.get(key).add(value);
+}
+
+function normalizePath(path) {
+  return path.replace(/^\.\//, '');
+}
+
+function stemOf(path) {
+  return basename(path).replace(/\.[^.]+$/, '');
+}
+
+function entryPathsOf(project, nodes) {
+  const declared = new Set([...Object.values(project.bin), project.main].filter(Boolean).map(normalizePath));
+  return new Set([...nodes.keys()].filter(path => declared.has(path) || ENTRY_NAMES.has(stemOf(path))));
+}
+
+function rootsOf(project, nodes, codePaths) {
+  const bins = Object.values(project.bin).map(normalizePath).filter(path => nodes.has(path));
+  const consumers = [...nodes.values()]
+    .filter(node => codePaths.has(node.path) && node.importedBy.size === 0 && node.importsFrom.size > 0 && !TEST_PATH.test(node.path))
+    .sort((a, b) => b.importsFrom.size - a.importsFrom.size || a.path.localeCompare(b.path))
+    .map(node => node.path);
+  const roots = [...new Set([...bins, ...consumers])];
+  if (roots.length > 0) return roots.slice(0, 3);
+  return [...nodes.values()]
+    .filter(node => codePaths.has(node.path))
+    .sort((a, b) => b.importsFrom.size - a.importsFrom.size || a.path.localeCompare(b.path))
+    .slice(0, 1)
+    .map(node => node.path);
+}
+
+function deadCodeOf(code, nodes, entryPaths) {
+  const deadCode = { tests: [], unusedExports: [], orphans: [] };
+  for (const file of code) {
+    const node = nodes.get(file.path);
+    if (TEST_PATH.test(file.path)) {
+      deadCode.tests.push(file.path);
+      continue;
+    }
+    if (entryPaths.has(file.path) || CONFIG_PATH.test(file.path) || node.importedBy.size > 0) continue;
+    if (node.exportedNames.size > 0) deadCode.unusedExports.push({ file: file.path, names: [...node.exportedNames] });
+    if (node.importsFrom.size === 0) deadCode.orphans.push(file.path);
+  }
+  return deadCode;
+}
+
+function callGraphOf(code) {
+  const declared = new Map();
+  for (const file of code) {
+    for (const fn of file.entities.functions) {
+      if (fn.name) addToSet(declared, fn.name, file.path);
+    }
+  }
+
+  const labelOf = (name, file) => (declared.get(name).size > 1 ? `${basename(file)}:${name}` : name);
+  const callees = new Map();
+  const callers = new Map();
+
+  for (const file of code) {
+    for (const [caller, names] of file.entities.calls) {
+      const from = labelOf(caller, file.path);
+      for (const callee of names) {
+        const owners = declared.get(callee);
+        if (!owners || owners.size !== 1 || callee === caller) continue;
+        addToSet(callees, from, callee);
+        addToSet(callers, callee, from);
       }
-
-      if (context.scripts.start) context.entry = context.scripts.start;
-      if (context.scripts.build) context.build = context.scripts.build;
-      if (context.scripts.test) context.test = context.scripts.test;
     }
+  }
 
-    const readmeFiles = ['README.md', 'readme.md', 'README.txt', 'README'];
-    for (const file of readmeFiles) {
-      const readmePath = join(rootPath, file);
-      if (existsSync(readmePath)) {
-        const content = readFileSync(readmePath, 'utf8');
-        const firstPara = content.split('\n\n').slice(0, 2).join(' ').replace(/^#+ /, '').replace(/\n/g, ' ').slice(0, 300);
-        context.readme = firstPara.trim();
-        break;
-      }
+  return { callees, callers };
+}
+
+function symbolsOf(code) {
+  const declared = new Set();
+  for (const file of code) {
+    for (const fn of file.entities.functions) if (fn.name) declared.add(fn.name);
+    for (const cls of file.entities.classes) declared.add(cls.name);
+    for (const name of file.entities.constants) declared.add(name);
+  }
+  const counts = new Map();
+  for (const file of code) {
+    for (const [identifier, count] of file.entities.identifiers) {
+      if (declared.has(identifier)) counts.set(identifier, (counts.get(identifier) || 0) + count);
     }
+  }
+  return [...counts.entries()]
+    .filter(([, count]) => count >= 3)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 10);
+}
 
-    const denoPath = join(rootPath, 'deno.json');
-    if (existsSync(denoPath)) {
-      context.runtime = 'Deno';
-      const deno = JSON.parse(readFileSync(denoPath, 'utf8'));
-      if (deno.tasks) context.scripts = deno.tasks;
+function ioOf(files) {
+  const io = {
+    envVars: new Set(),
+    urls: new Set(),
+    routes: new Set(),
+    fetches: 0,
+    axios: 0,
+    sql: 0,
+    fileOps: 0,
+    json: 0,
+    emitters: 0,
+    listeners: 0
+  };
+  for (const { entities } of files) {
+    for (const name of entities.envVars) io.envVars.add(name);
+    for (const url of entities.urls) io.urls.add(url);
+    for (const route of entities.routes) io.routes.add(route);
+    io.fetches += entities.http.fetches;
+    io.axios += entities.http.axios;
+    io.sql += entities.storage.sql;
+    io.fileOps += entities.storage.fileOps;
+    io.json += entities.storage.json;
+    io.emitters += entities.events.emitters;
+    io.listeners += entities.events.listeners;
+  }
+  return io;
+}
+
+function patternsOf(code) {
+  const patterns = { async: 0, await: 0, promise: 0, thenCatch: 0, tryCatch: 0, throws: 0, errorTypes: new Set(), constants: new Set(), globals: new Set() };
+  for (const { entities } of code) {
+    for (const key of ['async', 'await', 'promise', 'thenCatch', 'tryCatch', 'throws']) {
+      patterns[key] += entities.patterns[key];
     }
+    for (const type of entities.patterns.errorTypes) patterns.errorTypes.add(type);
+    for (const name of entities.constants) patterns.constants.add(name);
+    for (const name of entities.globals) patterns.globals.add(name);
+  }
+  return patterns;
+}
 
-    if (existsSync(join(rootPath, 'yarn.lock'))) context.packageManager = 'yarn';
-    else if (existsSync(join(rootPath, 'pnpm-lock.yaml'))) context.packageManager = 'pnpm';
-    else if (existsSync(join(rootPath, 'package-lock.json'))) context.packageManager = 'npm';
-  } catch (e) {}
+function languagesOf(code) {
+  const totals = new Map();
+  for (const file of code) totals.set(file.lang, (totals.get(file.lang) || 0) + file.entities.lines);
+  return [...totals.entries()].sort((a, b) => b[1] - a[1]);
+}
 
-  return context;
+function externalsOf(code, nodes) {
+  const packages = new Map();
+  const builtins = new Set();
+  for (const file of code) {
+    for (const name of nodes.get(file.path).externals) {
+      if (isBuiltin(name)) builtins.add(name);
+      else addToSet(packages, name, file.path);
+    }
+  }
+  return { packages, builtins };
 }
 
 function analyzeCodebase(rootPath = '.') {
   const parser = new Parser();
-  const stats = { files: 0, totalLines: 0, byLanguage: {}, errors: [] };
-  const entities = {};
-  const metrics = { depths: [], hotspots: [] };
-  const fileMetrics = {};
-  const fileAnalysis = {};
-  const projectContext = analyzeProjectContext(rootPath);
-
-  // Build comprehensive ignore set - always exclude build artifacts
+  const project = analyzeProjectContext(rootPath);
   const ignorePatterns = buildIgnoreSet(rootPath);
+  const files = [];
+  const errors = [];
 
+  let truncated = false;
   for (const { path, relativePath, lang } of walkDir(rootPath, rootPath, ignorePatterns)) {
+    if (files.length >= MAX_FILES) {
+      truncated = true;
+      break;
+    }
     try {
       parser.setLanguage(lang.parser);
       const source = readFileSync(path, 'utf8');
-      const tree = parser.parse(source);
-
-      const basicStats = analyzeTree(tree, source);
-      const ents = extractEntities(tree, source, lang.name);
-      const mets = calculateMetrics(tree, source);
-      const deps = extractDependencies(tree, source, relativePath, lang.name);
-      const advanced = extractAdvancedMetrics(tree, source);
-
-      stats.files++;
-      stats.totalLines += basicStats.lines;
-
-      if (!stats.byLanguage[lang.name]) {
-        stats.byLanguage[lang.name] = { files: 0, lines: 0, functions: 0, classes: 0, imports: 0, exports: 0, complexity: 0 };
-      }
-
-      const langStats = stats.byLanguage[lang.name];
-      langStats.files++;
-      langStats.lines += basicStats.lines;
-      langStats.functions += basicStats.functions;
-      langStats.classes += basicStats.classes;
-      langStats.imports += basicStats.imports;
-      langStats.exports += basicStats.exports;
-      langStats.complexity += basicStats.complexity;
-
-      if (!entities[lang.name]) {
-        entities[lang.name] = {
-          functions: new Map(),
-          classes: new Map(),
-          imports: new Set(),
-          exports: new Set(),
-          patterns: new Map(),
-          asyncPatterns: { async: 0, await: 0, promise: 0, callback: 0, thenCatch: 0 },
-          errorPatterns: { tryCatch: 0, throw: 0, errorTypes: new Set() },
-          internalCalls: new Map(),
-          constants: [],
-          globalState: [],
-          envVars: new Set(),
-          urls: new Set(),
-          filePaths: new Set(),
-          eventPatterns: { emitters: 0, listeners: 0 },
-          httpPatterns: { routes: [], fetches: 0, axios: 0 },
-          storagePatterns: { sql: 0, fileOps: 0, json: 0 }
-        };
-      }
-
-      for (const [sig, data] of ents.functions) {
-        const existing = entities[lang.name].functions.get(sig) || { count: 0, ...data };
-        existing.count += data.count;
-        entities[lang.name].functions.set(sig, existing);
-      }
-
-      for (const [name, data] of ents.classes) {
-        const existing = entities[lang.name].classes.get(name) || { count: 0, ...data };
-        existing.count += data.count;
-        entities[lang.name].classes.set(name, existing);
-      }
-
-      for (const imp of ents.imports) entities[lang.name].imports.add(imp);
-      for (const exp of ents.exports) entities[lang.name].exports.add(exp);
-
-      for (const [pattern, count] of ents.patterns) {
-        entities[lang.name].patterns.set(pattern, (entities[lang.name].patterns.get(pattern) || 0) + count);
-      }
-
-      if (ents.asyncPatterns) {
-        entities[lang.name].asyncPatterns.async += ents.asyncPatterns.async;
-        entities[lang.name].asyncPatterns.await += ents.asyncPatterns.await;
-        entities[lang.name].asyncPatterns.promise += ents.asyncPatterns.promise;
-        entities[lang.name].asyncPatterns.callback += ents.asyncPatterns.callback;
-        entities[lang.name].asyncPatterns.thenCatch += ents.asyncPatterns.thenCatch;
-      }
-
-      if (ents.errorPatterns) {
-        entities[lang.name].errorPatterns.tryCatch += ents.errorPatterns.tryCatch;
-        entities[lang.name].errorPatterns.throw += ents.errorPatterns.throw;
-        for (const errType of ents.errorPatterns.errorTypes) {
-          entities[lang.name].errorPatterns.errorTypes.add(errType);
-        }
-      }
-
-      if (ents.internalCalls) {
-        for (const [name, count] of ents.internalCalls) {
-          entities[lang.name].internalCalls.set(name, (entities[lang.name].internalCalls.get(name) || 0) + count);
-        }
-      }
-
-      if (ents.constants) {
-        entities[lang.name].constants.push(...ents.constants);
-      }
-
-      if (ents.globalState) {
-        entities[lang.name].globalState.push(...ents.globalState);
-      }
-
-      if (ents.envVars) {
-        for (const v of ents.envVars) entities[lang.name].envVars.add(v);
-      }
-      if (ents.urls) {
-        for (const u of ents.urls) entities[lang.name].urls.add(u);
-      }
-      if (ents.filePaths) {
-        for (const p of ents.filePaths) entities[lang.name].filePaths.add(p);
-      }
-      if (ents.eventPatterns) {
-        entities[lang.name].eventPatterns.emitters += ents.eventPatterns.emitters;
-        entities[lang.name].eventPatterns.listeners += ents.eventPatterns.listeners;
-      }
-      if (ents.httpPatterns) {
-        entities[lang.name].httpPatterns.fetches += ents.httpPatterns.fetches;
-        entities[lang.name].httpPatterns.axios += ents.httpPatterns.axios;
-        entities[lang.name].httpPatterns.routes.push(...ents.httpPatterns.routes);
-      }
-      if (ents.storagePatterns) {
-        entities[lang.name].storagePatterns.sql += ents.storagePatterns.sql;
-        entities[lang.name].storagePatterns.fileOps += ents.storagePatterns.fileOps;
-        entities[lang.name].storagePatterns.json += ents.storagePatterns.json;
-      }
-
-      metrics.depths.push(mets.maxDepth);
-
-      if (mets.branches > 10 || mets.maxDepth > 8) {
-        metrics.hotspots.push({
-          file: relativePath,
-          cx: mets.branches,
-          depth: mets.maxDepth,
-          loc: mets.loc
-        });
-      }
-
-      // Store for dependency/duplication analysis
-      fileAnalysis[relativePath] = {
-        imports: deps.imports,
-        exports: deps.exports,
-        importPaths: deps.importPaths,
-        exportedNames: deps.exportedNames
-      };
-
-      fileMetrics[relativePath] = {
-        loc: mets.loc,
-        advanced,
-        functionHashes: {},
-        functions: [],
-        classes: []
-      };
-
-      function collectFunctionHashes(node, depth = 0) {
-        if (node.type.includes('function') && node.type.includes('declaration') ||
-            node.type === 'method_definition' || node.type === 'function_item') {
-          const hash = hashFunction(node);
-          const sig = node.text.slice(0, 50);
-          fileMetrics[relativePath].functionHashes[sig] = hash;
-
-          const name = extractFunctionName(node);
-          const lines = node.text.split('\n').length;
-          const startLine = node.startPosition.row + 1;
-          fileMetrics[relativePath].functions.push({
-            name,
-            lines,
-            startLine,
-            params: countNodeParams(node)
-          });
-        }
-
-        if (node.type.includes('class') && node.type.includes('declaration') ||
-            node.type === 'struct_item' || node.type === 'enum_item' || node.type === 'interface_declaration') {
-          const name = extractClassName(node);
-          const startLine = node.startPosition.row + 1;
-          fileMetrics[relativePath].classes.push({
-            name,
-            startLine
-          });
-        }
-
-        for (const child of node.children) collectFunctionHashes(child, depth + 1);
-      }
-      collectFunctionHashes(tree.rootNode);
-
+      const tree = parser.parse((index) => source.slice(index, index + PARSE_CHUNK));
+      files.push({
+        path: relativePath,
+        lang: lang.name,
+        data: lang.data === true,
+        entities: extractEntities(tree, source),
+        deps: extractDependencies(tree, source)
+      });
     } catch (e) {
-      stats.errors.push({ file: relativePath, error: e.message });
+      errors.push({ file: relativePath, error: e.message });
     }
   }
 
-  metrics.hotspots.sort((a, b) => b.cx + b.depth - (a.cx + a.depth));
-
-  // Advanced analysis
-  const depGraph = buildDependencyGraph(fileAnalysis);
-  const duplicates = detectDuplication(fileMetrics);
-  const circular = detectCircularDeps(depGraph);
-  const fileSizes = analyzeFileSizes(fileMetrics);
-  const modules = analyzeModules(fileAnalysis, rootPath);
-
-  // Aggregate advanced metrics
-  const allIdentifiers = new Map();
-  const allFuncLengths = [];
-  const allFuncParams = [];
-
-  for (const [file, data] of Object.entries(fileMetrics)) {
-    if (data.advanced) {
-      for (const [id, count] of data.advanced.identifiers) {
-        allIdentifiers.set(id, (allIdentifiers.get(id) || 0) + count);
-      }
-      allFuncLengths.push(...data.advanced.functionLengths);
-      allFuncParams.push(...data.advanced.functionParams);
-    }
-  }
-
-  const deadCode = detectDeadCode(depGraph, fileMetrics, projectContext);
+  const code = files.filter(file => !file.data);
+  const codePaths = new Set(code.map(file => file.path));
+  const nodes = buildDependencyGraph(Object.fromEntries(files.map(file => [file.path, file.deps])));
+  const entryPaths = entryPathsOf(project, nodes);
+  const functions = code.flatMap(file => file.entities.functions.map(fn => ({ ...fn, file: file.path })));
+  const classes = code.reduce((sum, file) => sum + file.entities.classes.length, 0);
+  const complexity = code.reduce((sum, file) => sum + file.entities.complexity, 0);
+  const lines = code.reduce((sum, file) => sum + file.entities.lines, 0);
 
   return {
-    stats,
-    entities,
-    metrics,
-    depGraph,
-    duplicates,
-    circular,
-    fileSizes,
-    modules,
-    identifiers: allIdentifiers,
-    funcLengths: allFuncLengths,
-    funcParams: allFuncParams,
-    fileMetrics,
-    projectContext,
-    deadCode
+    project,
+    stats: { files: code.length, lines, functions: functions.length, classes, complexity, languages: languagesOf(code) },
+    files: code.map(file => ({ path: file.path, lang: file.lang, lines: file.entities.lines })),
+    functions,
+    nodes,
+    roots: rootsOf(project, nodes, codePaths),
+    entryPaths,
+    cycles: detectCircularDeps(nodes),
+    duplicates: detectDuplication(functions.filter(fn => fn.hash && fn.name)),
+    calls: callGraphOf(code),
+    deadCode: deadCodeOf(code, nodes, entryPaths),
+    externals: externalsOf(code, nodes),
+    io: ioOf(files),
+    patterns: patternsOf(code),
+    symbols: symbolsOf(code),
+    errors,
+    scan: { truncated, limit: MAX_FILES }
   };
 }
 
-export function analyze(rootPath = '.') {
-  const aggregated = analyzeCodebase(rootPath);
-  return formatUltraCompact(aggregated);
+export function analyze(rootPath = '.', options = {}) {
+  return formatUltraCompact(analyzeCodebase(rootPath), options);
 }
 
 export { analyzeCodebase, formatUltraCompact };

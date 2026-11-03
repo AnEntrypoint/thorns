@@ -352,12 +352,8 @@ THIRDPARTY*
 # === TEST & COVERAGE FILES ===
 *.test.*
 *.spec.*
-test/
-tests/
-__tests__/
 __mocks__/
 fixtures/
-spec/
 cypress/
 playwright/
 test-results/

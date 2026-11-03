@@ -1,21 +1,20 @@
 # Thorns - Ultra-Compact Codebase Intelligence
 
-Cross-platform codebase analysis using tree-sitter for maximum insight with minimal output.
+Cross-platform codebase analysis using tree-sitter: a one-shot overview an agent can read once, with a token budget.
 
 ## Features
 
 - **Cross-platform**: WSL, Linux, Windows, macOS (arm64/x64)
 - **12 languages**: JavaScript, TypeScript, Python, Rust, Go, C/C++, Java, C#, Ruby, PHP, JSON
-- **Dependency graph**: File-level imports, orphans, circular deps
-- **Code duplication**: AST-based clone detection
-- **Coupling metrics**: Most connected files
-- **File sizes**: Distribution and largest files
-- **Identifier usage**: Most common variables/functions
-- **Complexity hotspots**: High cx/depth files
-- **Ultra-comprehensive ignoring**: Auto-loads .gitignore, .dockerignore, .npmignore + 200+ built-in patterns
-- **Smart filtering**: Ignores node_modules, target, vendor, dist, build, .cache, etc. across all languages
-- **Ultra-compact**: Zero unnecessary tokens
-- **Fast**: Native parsers, ~1000 files/sec, skips 96%+ of irrelevant files
+- **Architecture tree**: Import tree from the entry points (`bin`, `main`, consumers), with each module's exports
+- **Call flow**: Which project functions call which, and the most-called internals
+- **Dead code**: Unused exports, orphan files; tests found by name
+- **Dependencies**: External packages, Node builtins, declared-but-unused packages
+- **Issues**: Import cycles, long functions, large files, many-parameter functions, structural duplicates
+- **I/O**: Environment variables, full URLs, HTTP calls and routes, storage, events
+- **Token budget**: Sections are dropped by priority to stay within `--budget`
+- **Ignoring**: Auto-loads .gitignore, .dockerignore, .npmignore, .thornsignore and 200+ built-in patterns
+- **Ultra-compact**: Packages and grammars are grouped, counts are shown as `name×n`
 
 ## Usage
 
@@ -26,10 +25,12 @@ Analyze current directory:
 bunx mcp-thorns
 ```
 
-Analyze specific directory:
+Analyze specific directory, capped at about 1200 characters:
 ```bash
-bunx mcp-thorns /path/to/codebase
+bunx mcp-thorns /path/to/codebase --budget 1200
 ```
+
+`--budget` counts characters. The default is 3000. `0` removes the limit.
 
 ### Install Globally with Bun
 
@@ -47,63 +48,62 @@ thorns /path/to/codebase
 ```javascript
 import { analyze } from 'mcp-thorns';
 
-// Get ultra-compact analysis as a string
-const output = analyze('./path/to/codebase');
+// Get the overview as a string, capped at a budget
+const output = analyze('./path/to/codebase', { budget: 1200 });
 console.log(output);
 
-// Or use the raw functions for custom formatting
+// Or use the raw model for custom formatting
 import { analyzeCodebase, formatUltraCompact } from 'mcp-thorns';
 
 const data = analyzeCodebase('./path/to/codebase');
-const formatted = formatUltraCompact(data);
+const formatted = formatUltraCompact(data, { budget: 1200 });
 ```
 
 ## Output Format
 
-Ultra-compact cheat sheet with maximum information density:
+The output is Markdown. Its header comes first, then sections in priority order. When the output would exceed the budget, the lowest-priority sections are dropped first. Example from this repository:
 
 ```
-━━━ 47f 8.5kL 44fn 5cls cx:7.9 d:21.7 ━━━
-JA 97% 40f 8.3kL 44fn 5c 575i 96e cx:7.9
-JS 3% 7f 214L 0fn 0c 0i 0e cx:0
-━━━ fn ━━━
-7× Ja:main(1)
-6× Ja:uuid(1)
-5× Ja:createApp(1)
-4× Ja:verifyApps(1)
-3× Ja:processNextApp(1)
-━━━ cls ━━━
-2× Ja:StatelessMCPTools
-2× Ja:ValidationSystem
-━━━ imports ━━━
-2× import { CallToolRequestSchema...
-1× import WebSocket from 'ws';
-━━━ calls ━━━
-504× console.log
-63× ws.on
-51× setTimeout
-━━━ ⚠ hotspots ━━━
-cx:57 d:19 src/validation-system.js
-cx:20 d:28 src/stateless-mcp-tools-basic.js
+# thorns 5.1.12 (cli, ESM)
+Perfect one-shot codebase overview: project context, architecture flow, async/error patterns, dead code, internal call graph
+bin: mcp-thorns, thorns
+scripts: analyze=node index.js · test=node verify-setup.mjs && node verify-overview.mjs
+tests: verify-overview.mjs, verify-setup.mjs
+10 files · 1.8k lines · 101 fn · 0 cls · cx 2.2 · JS 100%
+
+## Architecture
+index.js
+  lib.js(analyze, analyzeCodebase, formatUltraCompact)
+    analyzer.js(extractEntities)
+      advanced-metrics.js(hashFunction, detectDuplication, detectCircularDeps)
+    advanced-metrics.js(hashFunction, detectDuplication, detectCircularDeps) ↺
+    compact-formatter.js(formatUltraCompact)
+
+## Dead code
+unused exports: queries.js(QUERIES)
+orphans: queries.js
+
+## Calls
+analyzeCodebase → analyzeProjectContext, buildIgnoreSet, walkDir, extractEntities, extractDependencies +12
+most called: more×8, addToSet×2, cli×2, listed×2
+
+## Dependencies
+external: tree-sitter×1, tree-sitter-*×12
+builtins: child_process, crypto, fs, os, path, url
+
+legend: ×n occurrences · ↺ already shown · cx avg complexity · fn functions · cls classes · +n more
 ```
 
-**Legend:**
-- Abbreviations: `f`=files `L`=lines `fn`=functions `cls`=classes `i`=imports `e`=exports `cx`=complexity `d`=AST-depth `(N)`=param-count
-- Issues: `orph`=orphaned-files `dup`=duplicate-code `circ`=circular-deps `in/out`=dependency-coupling
-- `TOTALS`: Total files, lines, functions, classes, avg complexity, avg depth | Issues counts
-- Language rows: % of codebase, file/line/function/class/import/export counts, avg complexity
-- `TOP-FUNCTIONS(most-defined)`: Most common function signatures (count × lang : signature)
-- `TOP-CLASSES(most-defined)`: Most common classes
-- `TOP-IMPORTS(common-deps)`: Most frequent imports
-- `TOP-CALLS(frequent-invocations)`: Most called functions/APIs
-- `HOTSPOTS(complex-files)`: Complexity hotspots - refactor candidates (cx=complexity, d=depth)
-- `ORPHANS(unused-or-entries)`: Files not imported anywhere - potential dead code or entry points
-- `COUPLING(central-files)`: Files with most dependencies - central hubs, refactor candidates (in←imports, out→uses)
-- `DUPLICATES(code-clones)`: AST-based structural clones - consolidation candidates (count × hash : files)
-- `CIRCULAR-DEPS(import-cycles)`: Import cycles - architecture issues
-- `LARGEST-FILES(split-candidates)`: Largest files - maintainability risk
-- `FILE-SIZE-DISTRIBUTION`: File size distribution by line count
-- `TOP-IDENTIFIERS(common-names)`: Most used variable names in codebase
+### Sections
+
+- **Architecture**: Import tree from the entry points. Each module shows up to three exports. `↺` marks a module already shown above.
+- **Issues**: Import cycles, functions of 80+ lines, files of 400+ lines, functions with 6+ parameters, structural duplicates, parse errors.
+- **Dead code**: Exported names no file imports, and files nothing imports or uses.
+- **Calls**: Calls between project functions, with the most-called internals. A name declared in two files is shown as `file:name`.
+- **Dependencies**: External packages (grammar families grouped as `pkg-*`), Node builtins, declared packages that nothing imports.
+- **I/O**: Environment variables, distinct URLs, HTTP calls and routes, storage calls, event emitters and listeners.
+- **Patterns**: Async, await, promise and `then/catch` counts, try and throw counts with error types, module constants and globals.
+- **Core symbols**: Most-used identifiers that the project declares.
 
 ## Supported Languages
 
@@ -118,7 +118,9 @@ cx:20 d:28 src/stateless-mcp-tools-basic.js
 - C# (.cs)
 - Ruby (.rb)
 - PHP (.php)
-- JSON (.json)
+- JSON (.json), read for URLs and environment variables only
+
+Import resolution covers JavaScript/TypeScript, Python, Go and Rust. Other languages list their imports as external packages.
 
 ## Ignored Directories & Files
 
@@ -128,10 +130,12 @@ Automatically skips 200+ patterns including:
 - **Language-specific**: `node_modules`, `__pycache__`, `.gradle`, `Pods`, etc.
 - **Caches**: `.cache`, `.next`, `.nuxt`, `.parcel-cache`, `.vite`, `.turbo`
 - **IDEs**: `.vscode`, `.idea`, `.vs`, `.sublime-*`
-- **Test & coverage**: `.pytest_cache`, `.nyc_output`, `coverage`, `htmlcov`
+- **Coverage**: `.pytest_cache`, `.nyc_output`, `coverage`, `htmlcov`
 - **Home directories**: `~/.cache`, `~/.config`, `~/.local`, `~/.npm`, `~/.cargo`, etc. (when analyzing subdirs)
 - **Lock files**: `bun.lockb`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`
 - **Custom patterns**: Loads and merges `.gitignore`, `.dockerignore`, `.npmignore`, `.thornsignore`
+
+Test directories are included, so the overview can name them. A project that excludes tests in its own `.npmignore` keeps that exclusion.
 
 Thorns prioritizes speed by ignoring 96%+ of non-code files.
 
@@ -160,16 +164,17 @@ Thorns prioritizes speed by ignoring 96%+ of non-code files.
 
 ## How It Works
 
-1. Walks directory tree, filtering by extension
+1. Walks directory tree, filtering by extension and ignore patterns
 2. Parses each file with tree-sitter
-3. Analyzes AST for functions, classes, imports, exports, complexity
-4. Aggregates statistics by language
-5. Outputs compact summary
+3. Extracts functions, classes, calls, imports, exports and I/O in one pass per file
+4. Builds the import graph and the call graph from the project's own declarations
+5. Formats the model as Markdown, dropping the lowest-priority sections over the budget
 
 ## Performance
 
-- Skips files > 1MB
-- Uses native parsers (not WASM)
+- Skips files > 200KB and Python virtualenvs (any directory with `pyvenv.cfg`)
+- Scans at most 8000 files, and the overview says so when it stops early
+- Uses native parsers (not WASM); sources are parsed in chunks, so large files are not truncated
 - Minimal memory footprint
 - Processes ~1000 files/second on modern hardware
 # Triggered npm publishing
