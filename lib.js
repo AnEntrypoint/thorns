@@ -15,7 +15,7 @@ import PHP from 'tree-sitter-php';
 import JSONParser from 'tree-sitter-json';
 import { extractEntities } from './analyzer.js';
 import { formatUltraCompact } from './compact-formatter.js';
-import { extractDependencies, buildDependencyGraph, isBuiltin } from './dependency-analyzer.js';
+import { buildDependencyGraph, isBuiltin } from './dependency-analyzer.js';
 import { detectDuplication, detectCircularDeps } from './advanced-metrics.js';
 import { buildIgnoreSet, shouldIgnore } from './ignore-parser.js';
 
@@ -302,12 +302,13 @@ function analyzeCodebase(rootPath = '.') {
       parser.setLanguage(lang.parser);
       const source = readFileSync(path, 'utf8');
       const tree = parser.parse((index) => source.slice(index, index + PARSE_CHUNK));
+      const entities = extractEntities(tree, source);
       files.push({
         path: relativePath,
         lang: lang.name,
         data: lang.data === true,
-        entities: extractEntities(tree, source),
-        deps: extractDependencies(tree, source)
+        entities,
+        deps: entities.deps
       });
     } catch (e) {
       errors.push({ file: relativePath, error: e.message });

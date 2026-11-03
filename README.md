@@ -64,32 +64,55 @@ const formatted = formatUltraCompact(data, { budget: 1200 });
 The output is Markdown. Its header comes first, then sections in priority order. When the output would exceed the budget, the lowest-priority sections are dropped first. Example from this repository:
 
 ```
-# thorns 5.1.12 (cli, ESM)
+# thorns 5.1.13 (cli, ESM)
 Perfect one-shot codebase overview: project context, architecture flow, async/error patterns, dead code, internal call graph
 bin: mcp-thorns, thorns
 scripts: analyze=node index.js · test=node verify-setup.mjs && node verify-overview.mjs
 tests: verify-overview.mjs, verify-setup.mjs
-10 files · 1.8k lines · 101 fn · 0 cls · cx 2.2 · JS 100%
+10 files · 1.8k lines · 104 fn · 0 cls · cx 2.2 · JS 100%
 
 ## Architecture
 index.js
   lib.js(analyze, analyzeCodebase, formatUltraCompact)
     analyzer.js(extractEntities)
       advanced-metrics.js(hashFunction, detectDuplication, detectCircularDeps)
+      dependency-analyzer.js(newDependencies, collectDependencies, buildDependencyGraph +1)
     advanced-metrics.js(hashFunction, detectDuplication, detectCircularDeps) ↺
     compact-formatter.js(formatUltraCompact)
+    dependency-analyzer.js(newDependencies, collectDependencies, buildDependencyGraph +1) ↺
+    ignore-parser.js(shouldIgnore, buildIgnoreSet, loadDefaultIgnores +1)
+
+## Issues
+complex: verify-overview.mjs:97 buildTests (126L)
+duplicates: assert×2 (verify-overview.mjs, verify-setup.mjs)
 
 ## Dead code
 unused exports: queries.js(QUERIES)
 orphans: queries.js
 
 ## Calls
-analyzeCodebase → analyzeProjectContext, buildIgnoreSet, walkDir, extractEntities, extractDependencies +12
+analyzeCodebase → analyzeProjectContext, buildIgnoreSet, walkDir, extractEntities, buildDependencyGraph +11
+formatUltraCompact → architectureLines, issueLines, deadCodeLines, callLines, dependencyLines +5
+analyzer.js:visit → functionNodeOf, declaredName, functionRecord, recordIdentifier, recordCall +3
+buildTests → full, headerOf, sectionOf, statsOf, lineStarting +1
+exportedNamesOf → exportStatementNames, commonJsNames, pythonPublicName, goExportedName, rustPublicName
 most called: more×8, addToSet×2, cli×2, listed×2
 
 ## Dependencies
 external: tree-sitter×1, tree-sitter-*×12
 builtins: child_process, crypto, fs, os, path, url
+
+## I/O
+urls: https://api.example.com/v1/items, https://github.com/AnEntrypoint/mcp-thorns
+storage: sql×1, files×15, json×2
+
+## Patterns
+async: async×4, await×6, promise×2, then/catch×2
+errors: try×10, throw×3, Error
+constants: FUNCTION_TYPES, FUNCTION_VALUE_TYPES, CLASS_TYPES, BRANCH_TYPES, CALL_TYPES, IDENTIFIER_TYPES +34
+
+## Core symbols
+core: assert×59, test×54, full×16, more×14, fileText×10, lineStarting×8, main×7, sectionOf×7
 
 legend: ×n occurrences · ↺ already shown · cx avg complexity · fn functions · cls classes · +n more
 ```

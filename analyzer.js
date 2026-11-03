@@ -1,4 +1,5 @@
 import { hashFunction } from './advanced-metrics.js';
+import { collectDependencies, newDependencies } from './dependency-analyzer.js';
 
 const FUNCTION_TYPES = new Set([
   'function_declaration', 'generator_function_declaration', 'method_definition', 'function_item',
@@ -46,7 +47,8 @@ export function extractEntities(tree, source) {
     routes: new Set(),
     http: { fetches: 0, axios: 0 },
     storage: { sql: 0, fileOps: 0, json: 0 },
-    events: { emitters: 0, listeners: 0 }
+    events: { emitters: 0, listeners: 0 },
+    deps: newDependencies()
   };
   visit(tree.rootNode, null, entities);
   return entities;
@@ -83,6 +85,7 @@ function visit(node, scope, entities) {
     entities.patterns.async++;
   }
   if (MODULE_LEVEL_TYPES.has(type)) recordModuleLevel(node, type, entities);
+  collectDependencies(node, type, entities.deps);
 
   for (const child of node.children) visit(child, inner, entities);
 }

@@ -14,28 +14,23 @@ const EXPORT_TYPES = new Set([
   ...RUST_ITEM_TYPES
 ]);
 
-export function extractDependencies(tree, source) {
-  const deps = { specifiers: new Set(), exportedNames: new Set() };
+export function newDependencies() {
+  return { specifiers: new Set(), exportedNames: new Set() };
+}
 
-  function visit(node) {
-    const type = node.type;
-    if (IMPORT_TYPES.has(type)) {
-      for (const specifier of specifiersOf(node, type)) deps.specifiers.add(specifier);
-    }
-    if (type === 'call_expression') {
-      const callee = node.childForFieldName('function')?.text;
-      if (callee === 'require' || callee === 'import') {
-        for (const specifier of stringLiterals(node.childForFieldName('arguments'))) deps.specifiers.add(specifier);
-      }
-    }
-    if (EXPORT_TYPES.has(type)) {
-      for (const name of exportedNamesOf(node, type)) deps.exportedNames.add(name);
-    }
-    for (const child of node.children) visit(child);
+export function collectDependencies(node, type, deps) {
+  if (IMPORT_TYPES.has(type)) {
+    for (const specifier of specifiersOf(node, type)) deps.specifiers.add(specifier);
   }
-
-  visit(tree.rootNode);
-  return deps;
+  if (type === 'call_expression') {
+    const callee = node.childForFieldName('function')?.text;
+    if (callee === 'require' || callee === 'import') {
+      for (const specifier of stringLiterals(node.childForFieldName('arguments'))) deps.specifiers.add(specifier);
+    }
+  }
+  if (EXPORT_TYPES.has(type)) {
+    for (const name of exportedNamesOf(node, type)) deps.exportedNames.add(name);
+  }
 }
 
 export function buildDependencyGraph(fileAnalysis) {
