@@ -17,7 +17,7 @@ import { extractEntities } from './analyzer.js';
 import { formatUltraCompact } from './compact-formatter.js';
 import { buildDependencyGraph, isBuiltin } from './dependency-analyzer.js';
 import { detectDuplication, detectCircularDeps } from './advanced-metrics.js';
-import { buildIgnoreSet, shouldIgnore } from './ignore-parser.js';
+import { buildIgnoreMatcher } from './ignore-parser.js';
 
 const LANGUAGES = {
   '.js': { parser: JavaScript, name: 'JavaScript' },
@@ -54,15 +54,20 @@ function getLanguage(filepath) {
   return LANGUAGES[extname(filepath)];
 }
 
-function* walkDir(dir, baseDir = dir, ignorePatterns = new Set()) {
+function isSeparateProject(dir) {
+  return existsSync(join(dir, 'pyvenv.cfg')) || existsSync(join(dir, '.git'));
+}
+
+function* walkDir(dir, baseDir, ignore) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const fullPath = join(dir, entry.name);
     const relativePath = relative(baseDir, fullPath).split(sep).join('/');
+    const isDir = entry.isDirectory();
 
-    if (shouldIgnore(relativePath, ignorePatterns) || shouldIgnore(entry.name, ignorePatterns)) continue;
+    if (ignore.ignores(relativePath, isDir)) continue;
 
-    if (entry.isDirectory()) {
-      if (!existsSync(join(fullPath, 'pyvenv.cfg'))) yield* walkDir(fullPath, baseDir, ignorePatterns);
+    if (isDir) {
+      if (!isSeparateProject(fullPath)) yield* walkDir(fullPath, baseDir, ignore.enter(fullPath, relativePath));
     } else if (entry.isFile()) {
       const lang = getLanguage(entry.name);
       if (!lang) continue;
@@ -288,12 +293,12 @@ function externalsOf(code, nodes) {
 function analyzeCodebase(rootPath = '.') {
   const parser = new Parser();
   const project = analyzeProjectContext(rootPath);
-  const ignorePatterns = buildIgnoreSet(rootPath);
+  const ignore = buildIgnoreMatcher(rootPath);
   const files = [];
   const errors = [];
 
   let truncated = false;
-  for (const { path, relativePath, lang } of walkDir(rootPath, rootPath, ignorePatterns)) {
+  for (const { path, relativePath, lang } of walkDir(rootPath, rootPath, ignore)) {
     if (files.length >= MAX_FILES) {
       truncated = true;
       break;

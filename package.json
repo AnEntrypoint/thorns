@@ -27,7 +27,7 @@
   ],
   "scripts": {
     "analyze": "node index.js",
-    "test": "node verify-setup.mjs && node verify-overview.mjs"
+    "test": "node verify-setup.mjs && node verify-overview.mjs && node verify-ignore.mjs"
   },
   "bun": {
     "bin": {

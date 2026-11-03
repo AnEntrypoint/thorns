@@ -13,7 +13,7 @@ Cross-platform codebase analysis using tree-sitter: a one-shot overview an agent
 - **Issues**: Import cycles, long functions, large files, many-parameter functions, structural duplicates
 - **I/O**: Environment variables, full URLs, HTTP calls and routes, storage, events
 - **Token budget**: Sections are dropped by priority to stay within `--budget`
-- **Ignoring**: Auto-loads .gitignore, .dockerignore, .npmignore, .thornsignore and 200+ built-in patterns
+- **Ignoring**: Honors `.gitignore` (anchored, negated and nested files), `.thornsignore` and built-in patterns
 - **Ultra-compact**: Packages and grammars are grouped, counts are shown as `name×n`
 
 ## Usage
@@ -67,9 +67,9 @@ The output is Markdown. Its header comes first, then sections in priority order.
 # thorns 5.1.13 (cli, ESM)
 Perfect one-shot codebase overview: project context, architecture flow, async/error patterns, dead code, internal call graph
 bin: mcp-thorns, thorns
-scripts: analyze=node index.js · test=node verify-setup.mjs && node verify-overview.mjs
-tests: verify-overview.mjs, verify-setup.mjs
-10 files · 1.8k lines · 104 fn · 0 cls · cx 2.2 · JS 100%
+scripts: analyze=node index.js · test=node verify-setup.mjs && node verify-overview.mjs 
+tests: verify-ignore.mjs, verify-overview.mjs, verify-setup.mjs
+12 files · 2.0k lines · 114 fn · 0 cls · cx 2.1 · JS 100%
 
 ## Architecture
 index.js
@@ -80,7 +80,7 @@ index.js
     advanced-metrics.js(hashFunction, detectDuplication, detectCircularDeps) ↺
     compact-formatter.js(formatUltraCompact)
     dependency-analyzer.js(newDependencies, collectDependencies, buildDependencyGraph +1) ↺
-    ignore-parser.js(shouldIgnore, buildIgnoreSet, loadDefaultIgnores +1)
+    ignore-parser.js(loadDefaultRules, loadProjectRules, createIgnoreMatcher +1)
 
 ## Issues
 complex: verify-overview.mjs:97 buildTests (126L)
@@ -91,28 +91,29 @@ unused exports: queries.js(QUERIES)
 orphans: queries.js
 
 ## Calls
-analyzeCodebase → analyzeProjectContext, buildIgnoreSet, walkDir, extractEntities, buildDependencyGraph +11
+analyzeCodebase → analyzeProjectContext, buildIgnoreMatcher, walkDir, extractEntities, buildDependencyGraph +11
 formatUltraCompact → architectureLines, issueLines, deadCodeLines, callLines, dependencyLines +5
 analyzer.js:visit → functionNodeOf, declaredName, functionRecord, recordIdentifier, recordCall +3
 buildTests → full, headerOf, sectionOf, statsOf, lineStarting +1
 exportedNamesOf → exportStatementNames, commonJsNames, pythonPublicName, goExportedName, rustPublicName
-most called: more×8, addToSet×2, cli×2, listed×2
+most called: more×8, createIgnoreMatcher×3, parseRules×3, addToSet×2
 
 ## Dependencies
 external: tree-sitter×1, tree-sitter-*×12
-builtins: child_process, crypto, fs, os, path, url
+builtins: assert, child_process, crypto, fs, os, path, process, url
 
 ## I/O
 urls: https://api.example.com/v1/items, https://github.com/AnEntrypoint/mcp-thorns
-storage: sql×1, files×15, json×2
+storage: sql×1, files×18, json×2
 
 ## Patterns
 async: async×4, await×6, promise×2, then/catch×2
-errors: try×10, throw×3, Error
-constants: FUNCTION_TYPES, FUNCTION_VALUE_TYPES, CLASS_TYPES, BRANCH_TYPES, CALL_TYPES, IDENTIFIER_TYPES +34
+errors: try×14, throw×3, Error
+constants: FUNCTION_TYPES, FUNCTION_VALUE_TYPES, CLASS_TYPES, BRANCH_TYPES, CALL_TYPES, IDENTIFIER_TYPES +37
+globals: passed, failed
 
 ## Core symbols
-core: assert×59, test×54, full×16, more×14, fileText×10, lineStarting×8, main×7, sectionOf×7
+core: assert×103, test×71, ignores×42, project×33, full×16, more×14, fileText×10, lineStarting×8
 
 legend: ×n occurrences · ↺ already shown · cx avg complexity · fn functions · cls classes · +n more
 ```
@@ -156,9 +157,9 @@ Automatically skips 200+ patterns including:
 - **Coverage**: `.pytest_cache`, `.nyc_output`, `coverage`, `htmlcov`
 - **Home directories**: `~/.cache`, `~/.config`, `~/.local`, `~/.npm`, `~/.cargo`, etc. (when analyzing subdirs)
 - **Lock files**: `bun.lockb`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`
-- **Custom patterns**: Loads and merges `.gitignore`, `.dockerignore`, `.npmignore`, `.thornsignore`
+- **Custom patterns**: `.gitignore` (including nested files) and `.thornsignore`. `.npmignore` and `.dockerignore` are not applied: they decide what ships, not what the code is
 
-Test directories are included, so the overview can name them. A project that excludes tests in its own `.npmignore` keeps that exclusion.
+Test files and directories are included, so the overview can name them. Vendored code, fixtures and config files are skipped, and so are nested git repositories, which are separate projects.
 
 Thorns prioritizes speed by ignoring 96%+ of non-code files.
 
@@ -195,7 +196,7 @@ Thorns prioritizes speed by ignoring 96%+ of non-code files.
 
 ## Performance
 
-- Skips files > 200KB and Python virtualenvs (any directory with `pyvenv.cfg`)
+- Skips files > 200KB, Python virtualenvs (directories with `pyvenv.cfg`) and nested git repositories (directories with `.git`)
 - Scans at most 8000 files, and the overview says so when it stops early
 - Uses native parsers (not WASM); sources are parsed in chunks, so large files are not truncated
 - Minimal memory footprint

@@ -102,25 +102,23 @@ build/
 !CMakeLists.txt
 
 # === C# / .NET ===
-bin/
 obj/
 *.suo
 *.user
 *.userosscache
 *.sln.docstates
-[Dd]ebug/
-[Rr]elease/
-x64/
-x86/
-[Bb]uild/
-bld/
-[Bb]in/
+/[Dd]ebug/
+/[Rr]elease/
+/x64/
+/x86/
+/[Bb]uild/
+/bld/
 [Oo]bj/
 *.nupkg
 *.snupkg
 project.lock.json
 project.fragment.lock.json
-artifacts/
+/artifacts/
 
 # === RUBY ===
 *.gem
@@ -186,12 +184,12 @@ ui-debug.log
 .semantic-kernel/
 .openai-cache/
 .anthropic-cache/
-embeddings/
-vector-db/
-faiss-index/
-chromadb/
-pinecone-cache/
-weaviate-data/
+/embeddings/
+/vector-db/
+/faiss-index/
+/chromadb/
+/pinecone-cache/
+/weaviate-data/
 
 # === CLOUD PROVIDERS ===
 .aws/
@@ -249,7 +247,6 @@ desktop.ini
 
 # === DOCUMENTATION BUILD ===
 docs/_build/
-site/
 _site/
 .docusaurus/
 .vuepress/dist/
@@ -330,7 +327,6 @@ babel.config.*
 *.txt
 *.rst
 *.adoc
-docs/
 documentation/
 wiki/
 CHANGELOG*
@@ -350,8 +346,6 @@ THIRDPARTY*
 *.rej
 
 # === TEST & COVERAGE FILES ===
-*.test.*
-*.spec.*
 __mocks__/
 fixtures/
 cypress/
@@ -377,9 +371,7 @@ target/
 .gatsby/
 .docusaurus/
 .vuepress/dist/
-site/
 public/
-static/
 .assets/
 .cache/
 .parcel-cache/
@@ -397,7 +389,6 @@ temp/
 *.dump
 *.backup
 *.data/
-storage/
 logs/
 *.log
 
