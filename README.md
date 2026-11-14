@@ -16,44 +16,56 @@ Cross-platform codebase analysis using tree-sitter: a one-shot overview an agent
 - **Ignoring**: Honors `.gitignore` (anchored, negated and nested files), `.thornsignore` and built-in patterns
 - **Ultra-compact**: Packages and grammars are grouped, counts are shown as `name×n`
 
+## Get Thorns from GitHub
+
+Thorns is installed from this repository, not from a package registry:
+
+```bash
+git clone https://github.com/AnEntrypoint/mcp-thorns.git
+cd mcp-thorns
+```
+
+`package.json` and `package-lock.json` remain in the checkout for local dependencies and verification scripts. They are not the install path. If those dependencies are not already present in `node_modules`, install them locally for development before running the tests below.
+
+The legacy `.github/workflows/publish-npm.yml` publishing workflow is obsolete; GitHub is the supported distribution path.
+
 ## Usage
 
 ### Quick Start
 
-Analyze current directory:
+Analyze the current directory from your checkout:
+
 ```bash
-bunx mcp-thorns
+node index.js
 ```
 
-Analyze specific directory, capped at about 1200 characters:
+Analyze a specific directory, capped at about 1200 characters:
+
 ```bash
-bunx mcp-thorns /path/to/codebase --budget 1200
+node index.js /path/to/codebase --budget 1200
 ```
 
 `--budget` counts characters. The default is 3000. `0` removes the limit.
 
-### Install Globally with Bun
+To run a one-shot analysis straight from GitHub without cloning:
 
 ```bash
-bun add -g mcp-thorns
-```
-
-Then use:
-```bash
-thorns /path/to/codebase
+bash <(curl -fsSL https://raw.githubusercontent.com/AnEntrypoint/mcp-thorns/main/run.sh) /path/to/codebase
 ```
 
 ### Programmatic API
 
+Import the local files from your checkout:
+
 ```javascript
-import { analyze } from 'mcp-thorns';
+import { analyze } from './lib.js';
 
 // Get the overview as a string, capped at a budget
 const output = analyze('./path/to/codebase', { budget: 1200 });
 console.log(output);
 
 // Or use the raw model for custom formatting
-import { analyzeCodebase, formatUltraCompact } from 'mcp-thorns';
+import { analyzeCodebase, formatUltraCompact } from './lib.js';
 
 const data = analyzeCodebase('./path/to/codebase');
 const formatted = formatUltraCompact(data, { budget: 1200 });
@@ -165,7 +177,7 @@ Thorns prioritizes speed by ignoring 96%+ of non-code files.
 
 ## Requirements
 
-- **Runtime**: Bun >= 1.0
+- **Runtime**: Node.js >= 18 (or Bun >= 1.0)
 - **Platform**: Linux, macOS, Windows (WSL2), Docker
 - Prebuilt binaries download automatically for supported platforms
 
@@ -182,9 +194,9 @@ Thorns prioritizes speed by ignoring 96%+ of non-code files.
 
 | Method | Best For | Requirements |
 |--------|----------|--------------|
-| bunx | Quick analysis | `bun` |
-| Bun global | Repeated use | `bun` |
-| Programmatic | Integration | Bun |
+| GitHub checkout | Repeated use | `git`, Node.js or Bun |
+| GitHub one-liner | Quick analysis | `curl`, `bash`, Node.js or Bun |
+| Local import | Integration | A checkout and its local dependencies |
 
 ## How It Works
 
@@ -201,4 +213,7 @@ Thorns prioritizes speed by ignoring 96%+ of non-code files.
 - Uses native parsers (not WASM); sources are parsed in chunks, so large files are not truncated
 - Minimal memory footprint
 - Processes ~1000 files/second on modern hardware
-# Triggered npm publishing
+
+## Legacy Publishing
+
+`.github/workflows/publish-npm.yml` is an obsolete registry-publishing workflow. It is not a supported install or release path; use the GitHub repository and local scripts instead.

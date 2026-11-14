@@ -8,6 +8,14 @@ Claude Code hooks are shell commands that execute at various points in Claude's 
 
 ## Installation
 
+Clone the repository once, then call its local entry point from hooks:
+
+```bash
+git clone https://github.com/AnEntrypoint/mcp-thorns.git ~/thorns
+```
+
+Thorns is distributed through GitHub. Do not install it from a package registry. `package.json` is local development metadata; it is not the install path. If the checkout's dependencies are missing from `node_modules`, install them locally before using the hook.
+
 ### 1. Create the Hook Script
 
 ```bash
@@ -16,8 +24,8 @@ cat > ~/.claude/thorns-context-hook.sh << 'EOF'
 # Thorns context hook for Claude Code
 # Provides codebase analysis at session start and resume
 
-# Run thorns analysis and capture output
-ANALYSIS=$(npx mcp-thorns@latest . 2>/dev/null || echo "Thorns analysis unavailable")
+# Run the local GitHub checkout and capture output
+ANALYSIS=$(node "$HOME/thorns/index.js" . 2>/dev/null || echo "Thorns analysis unavailable")
 
 # Output as JSON with additionalContext
 cat <<EOFINNER
@@ -84,7 +92,7 @@ You should see JSON output with the codebase analysis.
 ## What It Does
 
 **On Session Start (including conversation resumes):**
-- Runs `npx mcp-thorns` to analyze your codebase
+- Runs `node "$HOME/thorns/index.js"` from the GitHub checkout to analyze your codebase
 - Fires on: new sessions, `--resume`, `--continue`, `/resume` commands
 - Provides Claude with:
   - File counts, language breakdown
@@ -183,4 +191,4 @@ rm ~/.claude/thorns-context-hook.sh
 
 - [Thorns GitHub](https://github.com/AnEntrypoint/mcp-thorns)
 - [Claude Code Hooks Documentation](https://docs.claude.com/en/docs/claude-code/hooks)
-- [npm Package](https://www.npmjs.com/package/mcp-thorns)
+
