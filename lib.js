@@ -48,6 +48,7 @@ const PARSE_CHUNK = 8192;
 const ENTRY_NAMES = new Set(['index', 'main', 'app', 'server', 'cli', 'lib', 'bin', '__main__', '__init__']);
 const TEST_PATH = /(^|\/)(tests?|__tests__|specs?)\/|(^|[\/._-])(test|tests|spec|specs|verify)([._-]|$)|\.(test|spec)\./;
 const CONFIG_PATH = /(^|\/)\.[^/]*$|\.config\.|(^|[\/._-])config\.(js|ts|mjs|cjs)$/;
+const TEMPLATE_PATH = /^templates\/|(^|\/)sim\.js$/;
 const README_NAMES = ['README.md', 'readme.md', 'README.txt', 'README'];
 
 function getLanguage(filepath) {
@@ -58,16 +59,20 @@ function isSeparateProject(dir) {
   return existsSync(join(dir, 'pyvenv.cfg')) || existsSync(join(dir, '.git'));
 }
 
-function* walkDir(dir, baseDir, ignore) {
+function isExcluded(relativePath, exclude) {
+  return exclude.some((prefix) => relativePath === prefix || relativePath.startsWith(prefix + '/'));
+}
+
+function* walkDir(dir, baseDir, ignore, exclude) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const fullPath = join(dir, entry.name);
     const relativePath = relative(baseDir, fullPath).split(sep).join('/');
     const isDir = entry.isDirectory();
 
-    if (ignore.ignores(relativePath, isDir)) continue;
+    if (ignore.ignores(relativePath, isDir) || isExcluded(relativePath, exclude)) continue;
 
     if (isDir) {
-      if (!isSeparateProject(fullPath)) yield* walkDir(fullPath, baseDir, ignore.enter(fullPath, relativePath));
+      if (!isSeparateProject(fullPath)) yield* walkDir(fullPath, baseDir, ignore.enter(fullPath, relativePath), exclude);
     } else if (entry.isFile()) {
       const lang = getLanguage(entry.name);
       if (!lang) continue;
@@ -170,6 +175,12 @@ function rootsOf(project, nodes, codePaths) {
     .map(node => node.path);
 }
 
+const ENGINE_HOOKS = new Set([
+  'update', 'updateSchedule', 'geometry', 'collider', 'look', 'lighting',
+  'onSpawn', 'onArrive', 'onLeave', 'onCollide', 'onTriggerEnter', 'onTriggerExit', 'onInput', 'onDespawn',
+  'setup', 'meta', 'texture', 'material', 'migrate', 'heightAt', 'materialAt',
+]);
+
 function deadCodeOf(code, nodes, entryPaths) {
   const deadCode = { tests: [], unusedExports: [], orphans: [] };
   for (const file of code) {
@@ -178,8 +189,11 @@ function deadCodeOf(code, nodes, entryPaths) {
       deadCode.tests.push(file.path);
       continue;
     }
-    if (entryPaths.has(file.path) || CONFIG_PATH.test(file.path) || node.importedBy.size > 0) continue;
-    if (node.exportedNames.size > 0) deadCode.unusedExports.push({ file: file.path, names: [...node.exportedNames] });
+    if (entryPaths.has(file.path) || CONFIG_PATH.test(file.path) || TEMPLATE_PATH.test(file.path) || node.importedBy.size > 0) continue;
+    const hooks = [...node.exportedNames].filter((name) => ENGINE_HOOKS.has(name));
+    const names = [...node.exportedNames].filter((name) => !ENGINE_HOOKS.has(name));
+    if (hooks.length > 0) continue;
+    if (names.length > 0) deadCode.unusedExports.push({ file: file.path, names });
     if (node.importsFrom.size === 0) deadCode.orphans.push(file.path);
   }
   return deadCode;
@@ -290,7 +304,7 @@ function externalsOf(code, nodes) {
   return { packages, builtins };
 }
 
-function analyzeCodebase(rootPath = '.') {
+function analyzeCodebase(rootPath = '.', exclude = []) {
   const parser = new Parser();
   const project = analyzeProjectContext(rootPath);
   const ignore = buildIgnoreMatcher(rootPath);
@@ -298,7 +312,7 @@ function analyzeCodebase(rootPath = '.') {
   const errors = [];
 
   let truncated = false;
-  for (const { path, relativePath, lang } of walkDir(rootPath, rootPath, ignore)) {
+  for (const { path, relativePath, lang } of walkDir(rootPath, rootPath, ignore, exclude)) {
     if (files.length >= MAX_FILES) {
       truncated = true;
       break;
@@ -351,7 +365,7 @@ function analyzeCodebase(rootPath = '.') {
 }
 
 export function analyze(rootPath = '.', options = {}) {
-  return formatUltraCompact(analyzeCodebase(rootPath), options);
+  return formatUltraCompact(analyzeCodebase(rootPath, options.exclude ?? []), options);
 }
 
 export { analyzeCodebase, formatUltraCompact };

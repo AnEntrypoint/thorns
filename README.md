@@ -45,6 +45,14 @@ Analyze a specific directory, capped at about 1200 characters:
 node index.js /path/to/codebase --budget 1200
 ```
 
+Leave out part of a tree (repeat `--exclude` for each path prefix):
+
+```bash
+node index.js /path/to/codebase --exclude mods/optimize-kit --exclude vendor
+```
+
+Dead-code checks treat engine-called exports as live: a file that exports a hook such as `update`, `geometry`, `collider`, `onSpawn` or `setup` is an entry point, and files under `templates/` are referenced by scene rows, so they are not reported as orphans.
+
 `--budget` counts characters. The default is 3000. `0` removes the limit.
 
 To run a one-shot analysis straight from GitHub without cloning:
