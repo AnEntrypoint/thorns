@@ -1,6 +1,6 @@
 {
   "name": "thorns",
-  "version": "5.1.16",
+  "version": "5.1.17",
   "description": "Perfect one-shot codebase overview: project context, architecture flow, async/error patterns, dead code, internal call graph",
   "type": "module",
   "main": "./lib.js",
